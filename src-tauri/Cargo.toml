@@ -1,0 +1,64 @@
+[package]
+name = "mi-home-desktop"
+version = "0.1.0"
+description = "Mi Home Desktop"
+authors = ["you"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "mi_home_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+futures-util = { version = "0.3", features = ["sink"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+zeroize = "1"
+base64 = "0.22"
+tempfile = "3"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+tauri-plugin-autostart = { version = "2", optional = true }
+tauri-plugin-window-state = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-plugin-autostart", "dep:tauri-plugin-window-state", "dep:tauri-plugin-dialog"]
+
+
+[[bin]]
+name = "mi-home-desktop"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

@@ -1,0 +1,48 @@
+name: Windows test package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Test Rust services
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked
+      - name: Build Windows executable and NSIS installer
+        run: pnpm tauri build --bundles nsis -- --locked
+      - name: Hash executable and installer
+        shell: pwsh
+        run: |
+          $artifacts = @('src-tauri/target/release/mi-home-desktop.exe') + @(Get-ChildItem 'src-tauri/target/release/bundle/nsis/*.exe' | ForEach-Object { $_.FullName })
+          $lines = foreach ($artifact in $artifacts) {
+            $hash = Get-FileHash -Algorithm SHA256 $artifact
+            '{0}  {1}' -f $hash.Hash.ToLower(), (Split-Path $artifact -Leaf)
+          }
+          $lines | Set-Content 'SHA256SUMS.txt' -Encoding utf8
+      - name: Upload test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiHome-Desktop-Windows-x64
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/mi-home-desktop.exe
+            src-tauri/target/release/bundle/nsis/*.exe
+            SHA256SUMS.txt
+            docs/WINDOWS_TESTING.md

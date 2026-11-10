@@ -1,0 +1,31 @@
+{
+  "name": "mi-home-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test:ui": "playwright test"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@vicons/ionicons5": "^0.13.0",
+    "naive-ui": "^2.42.0",
+    "pinia": "^3.0.3",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.0",
+    "@tauri-apps/cli": "^2",
+    "@vitejs/plugin-vue": "^6.0.7",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16",
+    "vue-tsc": "^3.3.5"
+  },
+  "packageManager": "pnpm@11.25.0"
+}
