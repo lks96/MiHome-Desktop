@@ -25,7 +25,7 @@
 ## 后续接入与验收
 
 1. 已完成：用户在 Windows 客户端实测云端视频授权通过，实际协议为 CS2；未要求用户提供账号密码或令牌。
-2. 接入对应协议的跨网络会合、NAT 穿透及必要中继；不能用局域网成功代替远程验证。需要通过真实设备进行握手、认证及持续保活测试。
+2. 接入 CS2 跨网会合及 Relay，完成 `0x28` 会话连接与 DRW 可靠通道；不能用局域网成功代替远程验证。需要通过真实设备进行握手、认证及持续保活测试。新增协议依据见下文用户方案复核。
 3. 接收并解密媒体帧，验证 H.264/H.265 与音频格式；按 WebView2 实际解码能力选择直通或转换，真实解码帧出现后才能显示播放成功。
 4. 在电脑与摄像头分处不同网络时验收首次出画、持续播放、断线重连、关闭详情释放连接与退出账号清理。保留现有 HA/go2rtc 高级功能，不把它当成米家直连远程播放已经实现。
 
@@ -35,4 +35,24 @@
 - Windows 项目 xiaomi-camera-viewer 明确要求摄像头与电脑在同一局域网，不能直接作为本需求的远程实现。[项目要求](https://github.com/lubos-hnanicek/xiaomi-camera-viewer/blob/581debe0bca0e90a1d0494bca961af08a4166a29/README.md#requirements)
 - CS2 厂商公开 PPCS API 文档描述了远程 P2P 与 relay 模式，初始化需要服务器参数，连接需要目标 P2P ID，`PPCS_ConnectByServer` 还接收 ServerString。公开示例/头文件并不等于已经获得与小米这个设备和服务兼容的 Windows 运行库或远程线上协议实现。[厂商 API 文档](https://github.com/cs2-network/P2P-solution/blob/2dafd8a62dd89f5a1ff6b60fabda535058d7ecbb/Doc/PPCS%20P2P%20API.pdf)
 
-当前实际阻塞是：尚未取得可集成且与该设备兼容的 Windows CS2 远程连接实现，也未独立实现小米环境的会合、穿透与中继流程。现有检测报告没有导出私密连接材料，不能据此推断服务端没有提供相应参数；也不能把授权成功转写成远程播放可用。继续开发需要解决这部分实现与接口资料，之后才有可进行真实跨网测试的播放器。此轮不新增只有检测功能的安装包。
+上述调研阶段的实际阻塞是缺少可用的 Windows CS2 远程实现及具体协议依据。用户随后提供的方案补充了 micam 线索，已找到可继续研究的会合、中继和会话协议实现，详见下节；本项目尚未实现这些流程。现有检测报告没有导出私密连接材料，不能据此推断服务端没有提供相应参数，也不能把授权成功转写成远程播放可用。
+
+## 用户提供方案的源码复核（2026-11-12）
+
+用户提供 `MiHome_CS2_Remote_Transport_Implementation_Plan.html`。该附件作为待核实的工程方案；其中的实施建议不等于当前代码、实机证据或新的发布指令。
+
+### 新增的有效依据
+
+- [eugeneRover/micam 固定版本](https://github.com/eugeneRover/micam/tree/2cc9d9e7607014d1d05c17bc5676544fbb0d5d24) 的 README 明确以跨网观看为目标，作者报告验证了 `chuangmi.camera.ipc019` 和 `chuangmi.camera.029a02`。已核对 `RelaySession.java`、`PpppConnection.java`、`MissSetup.java`、`DataChannel.java` 和云端参数解析，存在实际 Relay、会话连接及媒体通道逻辑，而非 LAN Search 包装。这是本次新找到的实现依据；作者的型号验证记录不等于本项目或 039a01 已完成验证。
+- 云端解析参考确认：`vendor.vendor_params` 包含 `p2p_id`、`init_string` 及可选 `license` / `crc_key`，`public_key`、`sign`、`miss_version` 位于结果层。播放流程必须保留与本次 `app_pubkey` 对应的临时私钥；现有探测流程有意丢弃私钥，不能直接拿探测结果启动会话。039a01 的完整字段与编码仍需由客户端实际响应确认，只输出脱敏字段存在性。
+- [Homebridge 远程项目固定版本](https://github.com/linanw/homebridge-mijia-remote-camera/tree/c7efb03e4592fb20b2f436fc8f30ce2f4e6a348e) 文档另有跨网设备验证记录，但依赖用户已持有的本地组件，且仅支持 Linux x64。可作为其他型号的可行性线索，不能直接提供本项目的 Windows 运行组件。
+
+### 实施前需要补全的部分
+
+1. **会话连接步骤：** `RLY_RDY (0x84)` 后还存在 `0x28`、88 字节负载的连接请求/响应，`MissSetup.java` 与收包循环有相应逻辑。需将其纳入明确状态和超时，处理重复请求；Relay Ready 不等于 MISS 已可用。
+2. **候选 token：** 同一个 Relay 可能从不同会合响应取得不同 token，应保留各候选响应的对应关系，不能只用 Relay 地址覆盖保存最后一个 token。使用协商的 session port 前还需要向该端口发送注册流量。
+3. **DRW 可靠传输：** 除握手外，需实现通道拆分、消息长度前缀、分片、16 位序号回绕、乱序重组、重复包 ACK，以及发送 ACK 跟踪和有界重发。参考代码的简化发送和缓存行为不能直接当成生产级可靠性；需增加长度上限、乱序窗口、队列上限、来源校验与取消清理。
+4. **媒体出口：** fMP4 / HLS 封装接收的是编码媒体，解码后的原始画面不能直接当成 fMP4 输入。兼容的 H.264 可重封装；H.265 应先检测 WebView2 实际能力，必要时解码并重新编码为 H.264。当前项目未捆绑 FFmpeg，若选用它，需要落实 Windows 二进制、编解码器配置、分发声明和退出清理。仅引入 HLS 播放器不能保证 H.265 出画。
+5. **集成方式：** micam 当前树未发现 LICENSE，因此不复制、移植或捆绑其 Java 源码/产物。以公开协议事实、其他许可明确的资料及本项目测试编写 Rust 实现；直接复用第三方代码时另行核实许可。目标仍为观看电脑内集成，不增加摄像头侧设备或要求用户安装 Java。
+
+更新后的开发顺序为：后端保留一次性 Provisioning → Rust Relay / `0x28` / DRW 协议及模拟测试 → 039a01 真实跨网 MISS 与媒体帧 → Windows 播放器与稳定性验证。本次复核仅更新技术记录；未新增协议代码或 EXE，也未对真实设备发起播放请求。
