@@ -98,6 +98,7 @@ pub fn run() {
             mijia_commands::mijia_logout,
             mijia_commands::mijia_sync,
             mijia_commands::mijia_get_properties,
+            mijia_commands::mijia_camera_probe,
             mijia_commands::mijia_set_property,
             commands::settings_get,
             commands::settings_update,

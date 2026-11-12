@@ -8,4 +8,5 @@ pub mod cameras;
 
 pub mod diagnostics;
 pub mod mijia;
+pub mod mijia_camera;
 pub mod scenes;

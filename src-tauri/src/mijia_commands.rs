@@ -4,6 +4,14 @@ use crate::{
 };
 
 #[tauri::command]
+pub async fn mijia_camera_probe(
+    service: tauri::State<'_, MiCloud>,
+    did: String,
+) -> Result<ApiResult<crate::services::mijia_camera::CameraProbeReport>, ()> {
+    Ok(service.camera_probe(&did).await.into())
+}
+
+#[tauri::command]
 pub async fn mijia_restore(
     service: tauri::State<'_, MiCloud>,
 ) -> Result<ApiResult<MiSnapshot>, ()> {

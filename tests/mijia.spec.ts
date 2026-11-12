@@ -6,11 +6,11 @@ async function mijiaFixture(page: Page, rememberFailure = false, expiresIn = 180
     const w = window as any
     const callbacks: Record<number, (value: unknown) => void> = {}
     let sequence = 0
-    const state = { authorized: false, canceled: [] as string[], writes: [] as unknown[], restoreCalls: 0, finish: null as null | ((value: unknown) => void) }
+    const state = { authorized: false, canceled: [] as string[], writes: [] as unknown[], restoreCalls: 0, cameraProbes: [] as string[], cameraProbeFinish: null as null | ((value: unknown) => void), finish: null as null | ((value: unknown) => void) }
     w.__mijiaTest = state
     const snapshot = () => ({ loggedIn: state.authorized, region: 'cn', accountLabel: state.authorized ? '小米账号 · 尾号 5678' : null, devices: state.authorized ? [
       { did: 'light-1', name: '书房灯', model: 'fixture.light.one', home: '我的家', room: '书房', online: true, camera: false },
-      { did: 'camera-1', name: '门口摄像头', model: 'fixture.camera.one', home: '我的家', room: '门口', online: true, camera: true },
+      { did: 'camera-1', name: '门口摄像头', model: 'chuangmi.camera.039a01', home: '我的家', room: '门口', online: true, camera: true },
       { did: 'offline-1', name: '离线设备', model: 'fixture.switch.one', home: '我的家', room: '客厅', online: false, camera: false },
     ] : [], warnings: [], updatedAt: state.authorized ? 1_800_000_000 : null })
     const properties = [{ siid: 2, piid: 1, name: '灯 · 电源', format: 'bool', readable: true, writable: true, range: null, choices: [], value: false, unavailable: false }]
@@ -31,6 +31,7 @@ async function mijiaFixture(page: Page, rememberFailure = false, expiresIn = 180
         if (command === 'mijia_cancel_login') { state.canceled.push(args.id); return { ok: true, data: true } }
         if (command === 'mijia_sync') return { ok: true, data: snapshot() }
         if (command === 'mijia_logout') { state.authorized = false; return { ok: true, data: true } }
+        if (command === 'mijia_camera_probe') { state.cameraProbes.push(args.did); return new Promise(resolve => { state.cameraProbeFinish = resolve }) }
         if (command === 'mijia_get_properties') return { ok: true, data: properties }
         if (command === 'mijia_set_property') { state.writes.push(args); return { ok: true, data: properties } }
         const values: Record<string, unknown> = {
@@ -113,4 +114,36 @@ test('QR expires while a poll is pending and late confirmation stays canceled', 
   await page.evaluate(() => (window as any).__mijiaTest.finish({ ok: true, data: { state: 'authorized' } }))
   await expect(page.locator('[data-mi-device]')).toHaveCount(0)
   expect(await page.evaluate(() => (window as any).__mijiaTest.restoreCalls)).toBe(1)
+})
+
+test('camera grant detection never claims remote playback or exposes cloud credentials', async ({ page }) => {
+  await mijiaFixture(page); await page.goto('/'); await scan(page)
+  await page.evaluate(() => (window as any).__mijiaTest.finish({ ok: true, data: { state: 'authorized' } }))
+  await page.locator('[data-mi-device="camera-1"]').getByRole('button', { name: '查看状态与控制' }).click()
+  await page.getByRole('button', { name: '检测视频授权', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => !!(window as any).__mijiaTest.cameraProbeFinish)).toBe(true)
+  await expect(page.getByRole('button', { name: '检测视频授权', exact: true })).toBeDisabled()
+  await page.evaluate(() => (window as any).__mijiaTest.cameraProbeFinish({ ok: true, data: {
+    model: 'chuangmi.camera.039a01', transport: 'cs2', cloudAuthorizationGranted: true, remotePlaybackVerified: false, observedAt: 1800000000,
+    token: 'private-fixture-token', sign: 'private-fixture-sign',
+  } }))
+  await expect(page.getByRole('alert').filter({ hasText: '云端视频授权已取得' })).toContainText('尚未建立远程视频通道')
+  const report = page.locator('[data-camera-probe-result]')
+  await expect(report).toContainText('"remotePlaybackVerified": false')
+  await expect(report).not.toContainText('private-fixture-')
+  await expect(page.locator('video')).toHaveCount(0)
+  expect(await page.evaluate(() => (window as any).__mijiaTest.cameraProbes)).toEqual(['camera-1'])
+})
+
+test('camera probe response cannot leak into another drawer after it is closed', async ({ page }) => {
+  await mijiaFixture(page); await page.goto('/'); await scan(page)
+  await page.evaluate(() => (window as any).__mijiaTest.finish({ ok: true, data: { state: 'authorized' } }))
+  await page.locator('[data-mi-device="camera-1"]').getByRole('button', { name: '查看状态与控制' }).click()
+  await page.getByRole('button', { name: '检测视频授权', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => !!(window as any).__mijiaTest.cameraProbeFinish)).toBe(true)
+  await page.keyboard.press('Escape')
+  await page.locator('[data-mi-device="light-1"]').getByRole('button', { name: '查看状态与控制' }).click()
+  await page.evaluate(() => (window as any).__mijiaTest.cameraProbeFinish({ ok: true, data: { model:'chuangmi.camera.039a01',transport:'cs2',cloudAuthorizationGranted:true,remotePlaybackVerified:false,observedAt:1800000000 } }))
+  await expect(page.locator('[data-camera-probe-result]')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '检测视频授权', exact: true })).toHaveCount(0)
 })

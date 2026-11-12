@@ -681,6 +681,36 @@ impl MiCloud {
         let properties = self.spec(did).await?;
         self.read_properties(&auth, did, properties).await
     }
+    pub async fn camera_probe(
+        &self,
+        did: &str,
+    ) -> Result<super::mijia_camera::CameraProbeReport, AppError> {
+        use super::mijia_camera;
+        let _operation = self.operation.lock().await;
+        let auth = self.auth().await?;
+        {
+            let state = self.state.lock().await;
+            let device = state.devices.iter().find(|d| d.did == did).ok_or_else(|| {
+                AppError::invalid_input("摄像头不在当前账号设备列表中，请先同步设备")
+            })?;
+            if !device.camera || device.model != mijia_camera::TARGET_MODEL {
+                return Err(AppError::invalid_input(
+                    "当前检测先适配 chuangmi.camera.039a01",
+                ));
+            }
+            if !device.online {
+                return Err(error(
+                    "MIJIA_DEVICE_OFFLINE",
+                    "摄像头已离线，请先检查设备状态",
+                    true,
+                ));
+            }
+        }
+        let data = self.request(&auth, "/v2/device/miss_get_vendor", json!({
+            "app_pubkey":mijia_camera::challenge_public_key(), "did":did, "support_vendors":"TUTK_CS2_MTP"
+        })).await?;
+        mijia_camera::report(&data, now())
+    }
     pub async fn set_property(
         &self,
         did: &str,
@@ -1046,6 +1076,13 @@ mod tests {
                         let mut request = B64.decode(&fields["data"]).unwrap(); crypt(&key,&mut request).unwrap();
                         let request: Value = serde_json::from_slice(&request).unwrap();
                         let result = match route {
+                            "/app/v2/device/miss_get_vendor" => {
+                                counts.fetch_add(1, Ordering::SeqCst);
+                                assert_eq!(request["did"], "123");
+                                assert_eq!(request["support_vendors"], "TUTK_CS2_MTP");
+                                assert_eq!(request["app_pubkey"].as_str().unwrap().len(),64);
+                                json!({"vendor":{"vendor":4,"vendor_params":{"p2p_id":"private-id"}},"public_key":"ab".repeat(32),"sign":"private-sign"})
+                            },
                             "/app/home/device_list" => json!({"list":[{"did":"123","name":"书房灯","model":"fixture.light.one","isOnline":true,"token":"must-not-leak","localip":"192.168.1.2"}]}),
                             "/app/v2/homeroom/gethome_merged" => json!({"homelist":[{"name":"我的家","roomlist":[{"name":"书房","dids":["123"]}]}]}),
                             "/app/miotspec/prop/get" => Value::Array(request["params"].as_array().unwrap().iter().map(|p| json!({"did":"123","siid":p["siid"],"piid":p["piid"],"code":0,"value":if p["piid"] == 1 {json!(false)} else {json!(1)}})).collect()),
@@ -1138,6 +1175,40 @@ mod tests {
             Instant::now() - Duration::from_secs(1);
         assert_eq!(cloud.poll_login(&qr.id).await.unwrap().state, "expired");
         assert!(!cloud.snapshot().await.logged_in);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn camera_probe_checks_account_model_and_online_status_before_requesting_a_grant() {
+        let (endpoint, task, calls) = server(false, false).await;
+        let mut cloud = MiCloud::new(Arc::new(MemoryCredentials::default()));
+        cloud.endpoint = Some(endpoint);
+        let qr = cloud.start_login("cn".into(), true).await.unwrap();
+        cloud.poll_login(&qr.id).await.unwrap();
+        assert!(cloud.camera_probe("another-account-device").await.is_err());
+        cloud.state.lock().await.devices.push(MiDevice {
+            did: "123".into(),
+            name: "fixture".into(),
+            model: "other.camera.model".into(),
+            room: "".into(),
+            home: "".into(),
+            online: true,
+            camera: true,
+        });
+        assert!(cloud.camera_probe("123").await.is_err());
+        {
+            let mut state = cloud.state.lock().await;
+            state.devices[0].model = super::super::mijia_camera::TARGET_MODEL.into();
+            state.devices[0].online = false;
+        }
+        assert!(cloud.camera_probe("123").await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        cloud.state.lock().await.devices[0].online = true;
+        let probe = cloud.camera_probe("123").await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.transport, "cs2");
+        assert!(!probe.remote_playback_verified);
+        assert!(!serde_json::to_string(&probe).unwrap().contains("private-"));
         task.abort();
     }
 

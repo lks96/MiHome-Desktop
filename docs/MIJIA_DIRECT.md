@@ -35,3 +35,5 @@ Playwright 使用测试目录内的 IPC fixture 验证首页、手机确认后�
 真实联调需允许 `account.xiaomi.com` 及 `*.account.xiaomi.com`、`sts.api.io.mi.com`、`api.io.mi.com`（以及所选地区对应的 `de/us/ru/tw/sg/in/i2.api.io.mi.com`）和 `miot-spec.org`。Windows 交叉构建另外需要 `snapshot.debian.org` 与 `download.visualstudio.microsoft.com`。不需要把账号密码或令牌提供给开发者。
 
 协议行为参考社区项目 [Xiaomi Cloud Tokens Extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor) 的 QR 流程和 [Xiaomi Miot](https://github.com/al-one/hass-xiaomi-miot) 的米家云/MIoT 请求。小米服务接口发生变化时需重新验证。
+
+`v0.2.1-camera.1` 新增 `chuangmi.camera.039a01` 的视频授权检测，只输出经过筛选的协议与授权状态。该检测不代表跨网络直播已经实现，使用步骤与技术边界见 [039a01 远程适配记录](CAMERA_039A01_REMOTE.md)。
