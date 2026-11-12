@@ -99,6 +99,9 @@ pub fn run() {
             mijia_commands::mijia_sync,
             mijia_commands::mijia_get_properties,
             mijia_commands::mijia_camera_probe,
+            mijia_commands::camera_remote_start,
+            mijia_commands::camera_remote_status,
+            mijia_commands::camera_remote_stop,
             mijia_commands::mijia_set_property,
             commands::settings_get,
             commands::settings_update,
@@ -131,6 +134,13 @@ pub fn run() {
             commands::settings_get_diagnostics,
             commands::settings_export_logs
         ])
-        .run(tauri::generate_context!())
-        .expect("Unable to initialize Mi Home Desktop; check application logs");
+        .build(tauri::generate_context!())
+        .expect("Unable to initialize Mi Home Desktop; check application logs")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+                if let Some(cloud) = app.try_state::<services::mijia::MiCloud>() {
+                    tauri::async_runtime::block_on(cloud.cameras.stop_all());
+                }
+            }
+        });
 }

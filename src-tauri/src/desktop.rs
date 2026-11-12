@@ -158,6 +158,12 @@ pub fn window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
         return;
     }
     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        if let Some(cloud) = window.try_state::<crate::services::mijia::MiCloud>() {
+            let cameras = cloud.cameras.clone();
+            tauri::async_runtime::spawn(async move {
+                cameras.stop_all().await;
+            });
+        }
         let Some(state) = window.try_state::<DesktopState>() else {
             return;
         };

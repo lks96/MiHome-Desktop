@@ -33,3 +33,4 @@ dist-ssr
 # Browser test output
 /test-results/
 /playwright-report/
+/src-tauri/resources/ffmpeg/

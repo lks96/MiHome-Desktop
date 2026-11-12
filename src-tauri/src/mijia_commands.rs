@@ -4,6 +4,29 @@ use crate::{
 };
 
 #[tauri::command]
+pub async fn camera_remote_start(
+    service: tauri::State<'_, MiCloud>,
+    did: String,
+) -> Result<ApiResult<crate::services::camera_stream::StreamStatus>, ()> {
+    Ok(service.camera_remote_start(&did).await.into())
+}
+#[tauri::command]
+pub async fn camera_remote_status(
+    service: tauri::State<'_, MiCloud>,
+    session_id: String,
+) -> Result<ApiResult<crate::services::camera_stream::StreamStatus>, ()> {
+    Ok(service.cameras.status(&session_id).await.into())
+}
+#[tauri::command]
+pub async fn camera_remote_stop(
+    service: tauri::State<'_, MiCloud>,
+    session_id: String,
+) -> Result<ApiResult<bool>, ()> {
+    service.cameras.stop(&session_id).await;
+    Ok(Ok(true).into())
+}
+
+#[tauri::command]
 pub async fn mijia_camera_probe(
     service: tauri::State<'_, MiCloud>,
     did: String,

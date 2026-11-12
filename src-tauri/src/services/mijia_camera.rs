@@ -7,6 +7,67 @@ use zeroize::Zeroizing;
 
 pub const TARGET_MODEL: &str = "chuangmi.camera.039a01";
 
+/// A playback grant is deliberately neither Debug nor Serialize. It never crosses IPC.
+pub struct RemoteGrant {
+    pub peer: Zeroizing<[u8; 20]>,
+    pub servers: Vec<std::net::Ipv4Addr>,
+    pub public: String,
+    pub sign: Zeroizing<String>,
+    pub key: Zeroizing<[u8; 32]>,
+}
+pub struct Challenge {
+    private: StaticSecret,
+    pub public: String,
+}
+impl Default for Challenge {
+    fn default() -> Self {
+        let mut seed = Zeroizing::new([0; 32]);
+        rand::rng().fill_bytes(&mut *seed);
+        let private = StaticSecret::from(*seed);
+        let public = PublicKey::from(&private)
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        Self { private, public }
+    }
+}
+pub fn remote_grant(data: &Value, challenge: Challenge) -> Result<RemoteGrant, AppError> {
+    use super::{cs2, miss};
+    let incomplete = || {
+        AppError::new(
+            "CAMERA_PROVISIONING_INCOMPLETE",
+            "小米未返回完整的远程连接参数，请重新连接",
+            true,
+        )
+    };
+    report(data, 0)?;
+    if data["vendor"]["vendor"].as_u64() != Some(4) {
+        return Err(AppError::new(
+            "CAMERA_VENDOR_UNSUPPORTED",
+            "当前远程播放器仅适配 CS2 摄像头",
+            false,
+        ));
+    }
+    let params = &data["vendor"]["vendor_params"];
+    let peer = cs2::protocol::peer_id(params["p2p_id"].as_str().ok_or_else(incomplete)?)?;
+    let servers = cs2::protocol::servers(params["init_string"].as_str().ok_or_else(incomplete)?)?;
+    let public = miss::hex_key(data["public_key"].as_str().ok_or_else(incomplete)?)?;
+    let shared = challenge.private.diffie_hellman(&PublicKey::from(public));
+    if !shared.was_contributory() {
+        return Err(incomplete());
+    }
+    let secret = Zeroizing::new(shared.to_bytes());
+    let key = salsa20::hsalsa::<salsa20::cipher::consts::U10>((&*secret).into(), (&[0; 16]).into());
+    Ok(RemoteGrant {
+        peer: Zeroizing::new(peer),
+        servers,
+        public: challenge.public,
+        sign: Zeroizing::new(data["sign"].as_str().ok_or_else(incomplete)?.to_owned()),
+        key: Zeroizing::new(key.into()),
+    })
+}
+
 /// Only this allowlisted report crosses IPC. Never serialize the cloud response.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +132,29 @@ pub fn report(data: &Value, observed_at: u64) -> Result<CameraProbeReport, AppEr
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn provisioning_keeps_the_matching_ephemeral_key_and_rejects_noncontributory_keys() {
+        let challenge = Challenge::default();
+        let app_public = super::super::miss::hex_key(&challenge.public).unwrap();
+        let device_private = StaticSecret::from([7; 32]);
+        let device_public = PublicKey::from(&device_private)
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let data = json!({"vendor":{"vendor":4,"vendor_params":{"p2p_id":"TEST-42-CHECK","init_string":"EBHPFHAHLMJIHOJM"}},"public_key":device_public,"sign":"fixture"});
+        let expected = device_private.diffie_hellman(&PublicKey::from(app_public));
+        let expected = salsa20::hsalsa::<salsa20::cipher::consts::U10>(
+            expected.as_bytes().into(),
+            (&[0; 16]).into(),
+        );
+        let grant = remote_grant(&data, challenge).unwrap();
+        assert_eq!(&*grant.key, &expected[..]);
+        assert_eq!(grant.servers, [std::net::Ipv4Addr::new(1, 2, 3, 4)]);
+        let mut bad = data;
+        bad["public_key"] = json!("00".repeat(32));
+        assert!(remote_grant(&bad, Challenge::default()).is_err());
+    }
     #[test]
     fn camera_reports_do_not_disclose_keys_tokens_or_addresses_or_claim_playback() {
         let input = json!({"vendor":{"vendor":4,"vendor_params":{"p2p_id":"private-uid","password":"private-password","server":"private-relay"}},"public_key":"ab".repeat(32),"sign":"private-signature","token":"private-token"});

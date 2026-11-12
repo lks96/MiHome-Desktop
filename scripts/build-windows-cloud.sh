@@ -4,6 +4,7 @@ set -euo pipefail
 source /workspace/.toolchains/activate-windows.sh
 ulimit -c 0
 cd "$(dirname "$0")/.."
+python3 scripts/prepare-windows-media.py
 pnpm tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --no-bundle -- --locked
 # The Linux Tauri CLI probes tray libraries even when bundling a Windows target.
 export PATH="/workspace/.toolchains/bin:$PATH"

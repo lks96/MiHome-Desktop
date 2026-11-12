@@ -4,7 +4,7 @@
 
 开发版默认采用米家账号直连：选择地区 → 用米家 App 扫码确认 → 自动同步家庭、房间与设备 → 控制受支持的 MIoT 能力。记住登录使用 Windows 凭据管理器，无需搭建 Home Assistant 或填写令牌。Home Assistant 与 go2rtc 保留在高级接入中。
 
-[下载 v0.2.1 摄像头授权检测测试版](https://github.com/lks96/MiHome-Desktop/releases/tag/v0.2.1-camera.1)。本版已完成 Windows x64 Release 编译、NSIS 打包和真实二维码获取验证，并修正小米地区长轮询域名的兼容问题。**手机确认后的授权、真实设备控制及 Windows 桌面行为仍需实机测试**。摄像头可自动识别，`chuangmi.camera.039a01` 详情页新增视频授权检测；该检测不会播放画面，跨网络直播与米家云场景尚未实现；旧版及蓝牙设备的直接控制取决于云端能力。安装包未签名。
+[下载 v0.3.0 CS2 远程播放测试版](https://github.com/lks96/MiHome-Desktop/releases/tag/v0.3.0-cs2.1)。针对 `chuangmi.camera.039a01` 新增“远程播放”：米家扫码会话 → CS2 Relay → MISS → Windows 播放器，观看电脑之外无需部署设备。**已编写协议与播放代码；目标摄像头的真实跨网播放、Windows 实际出画和 30 分钟稳定性仍待实测**，不能视为型号兼容承诺。首版仅视频；请使用完整安装包或保留全部组件的便携包，安装包未签名。
 
 [米家直连说明](docs/MIJIA_DIRECT.md) · [039a01 远程适配与检测说明](docs/CAMERA_039A01_REMOTE.md)
 
@@ -13,6 +13,7 @@
 - Node.js LTS、pnpm
 - Rust stable、Cargo
 - Windows 开发与打包需要 Visual Studio C++ Build Tools 和 WebView2 Runtime
+- 视频组件先按 [Windows 构建说明](docs/WINDOWS_BUILD.md) 准备；Rust 媒体集成测试需要本机 FFmpeg（H.264/H.265 编码器）
 
 ## 本地开发
 

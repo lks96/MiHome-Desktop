@@ -22,7 +22,7 @@
 
 较旧的非 MIoT 设备、仅蓝牙设备、网关子设备、跨地区或共享设备的能力仍需真实账号验证。登录本身不保证所有型号可控。没有公开能力的设备保留在列表中并提示待支持。
 
-**摄像头：** 按型号自动识别，显示“此型号直播待适配”；当前没有实现米家云直接直播、云端录像或摄像头专用动作。原有 HA/go2rtc 视频接入仍可从高级入口使用。米家云场景尚未接入，HA 场景仍可在 HA 模式使用。
+**摄像头：** 按型号自动识别。`chuangmi.camera.039a01` 提供 CS2 远程播放测试入口，包含会合/中继、MISS 和 Windows 视频组件；真实跨网与目标固件仍待实测，首版无音频。其他型号仍提示待适配。未实现云端录像或摄像头专用动作。原有 HA/go2rtc 视频接入仍可从高级入口使用。米家云场景尚未接入，HA 场景仍可在 HA 模式使用。
 
 ## 验证与限制
 
@@ -37,3 +37,5 @@ Playwright 使用测试目录内的 IPC fixture 验证首页、手机确认后�
 协议行为参考社区项目 [Xiaomi Cloud Tokens Extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor) 的 QR 流程和 [Xiaomi Miot](https://github.com/al-one/hass-xiaomi-miot) 的米家云/MIoT 请求。小米服务接口发生变化时需重新验证。
 
 `v0.2.1-camera.1` 新增 `chuangmi.camera.039a01` 的视频授权检测，只输出经过筛选的协议与授权状态。该检测不代表跨网络直播已经实现，使用步骤与技术边界见 [039a01 远程适配记录](CAMERA_039A01_REMOTE.md)。
+
+`v0.3.0-cs2.1` 的远程测试实现与验收边界见 [CS2 协议说明](CS2_PROTOCOL.md)。原有扫码与高级 HA/go2rtc 保留；关闭播放页、隐藏窗口或退出账号会释放远程会话。

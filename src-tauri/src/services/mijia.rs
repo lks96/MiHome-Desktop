@@ -219,6 +219,7 @@ pub struct MiCloud {
     credentials: Arc<dyn CredentialStore>,
     state: Arc<Mutex<State>>,
     operation: Arc<Mutex<()>>,
+    pub cameras: super::camera_stream::CameraStreams,
     #[cfg(test)]
     endpoint: Option<Url>,
 }
@@ -228,6 +229,7 @@ impl MiCloud {
             credentials,
             state: Arc::new(Mutex::new(State::default())),
             operation: Arc::new(Mutex::new(())),
+            cameras: super::camera_stream::CameraStreams::default(),
             #[cfg(test)]
             endpoint: None,
         }
@@ -279,6 +281,7 @@ impl MiCloud {
             return Err(AppError::invalid_input("请选择米家 App 中使用的服务地区"));
         }
         let _operation = self.operation.lock().await;
+        self.cameras.stop_all().await;
         self.state.lock().await.pending = None;
         let http = client()?;
         let device_id = uuid::Uuid::new_v4().simple().to_string();
@@ -456,6 +459,7 @@ impl MiCloud {
         // Invalidate a pending long poll immediately, even while it is awaiting HTTP.
         self.state.lock().await.pending = None;
         let _operation = self.operation.lock().await;
+        self.cameras.stop_all().await;
         self.credentials.delete(SLOT)?;
         *self.state.lock().await = State::default();
         Ok(true)
@@ -710,6 +714,42 @@ impl MiCloud {
             "app_pubkey":mijia_camera::challenge_public_key(), "did":did, "support_vendors":"TUTK_CS2_MTP"
         })).await?;
         mijia_camera::report(&data, now())
+    }
+    pub async fn camera_remote_start(
+        &self,
+        did: &str,
+    ) -> Result<super::camera_stream::StreamStatus, AppError> {
+        use super::mijia_camera;
+        let _operation = self.operation.lock().await;
+        let auth = self.auth().await?;
+        {
+            let state = self.state.lock().await;
+            let device = state.devices.iter().find(|d| d.did == did).ok_or_else(|| {
+                AppError::invalid_input("摄像头不在当前账号设备列表中，请先同步设备")
+            })?;
+            if !device.camera || device.model != mijia_camera::TARGET_MODEL {
+                return Err(AppError::invalid_input(
+                    "当前远程测试仅适配 chuangmi.camera.039a01",
+                ));
+            }
+            if !device.online {
+                return Err(error(
+                    "MIJIA_DEVICE_OFFLINE",
+                    "摄像头已离线，请先检查设备状态",
+                    true,
+                ));
+            }
+        }
+        let cloud = self.clone();
+        let device = did.to_owned();
+        self.cameras.launch(did,async move {
+            let challenge=mijia_camera::Challenge::default();
+            let mut data=cloud.request(&auth,"/v2/device/miss_get_vendor",json!({"app_pubkey":challenge.public,"did":device,"support_vendors":"TUTK_CS2_MTP"})).await?;
+            let result=mijia_camera::remote_grant(&data,challenge);
+            fn clear(v:&mut Value) {match v {Value::String(s)=>s.zeroize(),Value::Array(a)=>a.iter_mut().for_each(clear),Value::Object(o)=>o.values_mut().for_each(clear),_=>{}}}
+            clear(&mut data);
+            result
+        }).await
     }
     pub async fn set_property(
         &self,
@@ -1209,6 +1249,46 @@ mod tests {
         assert_eq!(probe.transport, "cs2");
         assert!(!probe.remote_playback_verified);
         assert!(!serde_json::to_string(&probe).unwrap().contains("private-"));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn remote_start_requires_owned_online_model_and_logout_cancels_sessions() {
+        let (endpoint, task, calls) = server(false, false).await;
+        let mut cloud = MiCloud::new(Arc::new(MemoryCredentials::default()));
+        cloud.endpoint = Some(endpoint);
+        assert!(cloud.camera_remote_start("123").await.is_err());
+        let qr = cloud.start_login("cn".into(), true).await.unwrap();
+        cloud.poll_login(&qr.id).await.unwrap();
+        assert!(cloud.camera_remote_start("other-device").await.is_err());
+        cloud.state.lock().await.devices.push(MiDevice {
+            did: "123".into(),
+            name: "fixture".into(),
+            model: super::super::mijia_camera::TARGET_MODEL.into(),
+            home: "".into(),
+            room: "".into(),
+            online: false,
+            camera: true,
+        });
+        assert!(cloud.camera_remote_start("123").await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        cloud.state.lock().await.devices[0].online = true;
+        let session = cloud.camera_remote_start("123").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let st = cloud.cameras.status(&session.session_id).await.unwrap();
+                if st.stage == "failed" {
+                    assert!(!serde_json::to_string(&st).unwrap().contains("private-"));
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        cloud.logout().await.unwrap();
+        assert!(cloud.cameras.status(&session.session_id).await.is_err());
         task.abort();
     }
 

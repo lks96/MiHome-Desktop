@@ -1,12 +1,14 @@
 # Windows 测试包构建
 
+> 0.3.0 CS2 远程测试实现：53 项 Rust 测试通过；米家界面 12 项通过，包含实际生成 HLS 的浏览器解码。Windows MSVC 目标检查通过。真实摄像头跨网与 Windows 出画仍待实测。
+
 > 2026-11-12：`v0.2.1-camera.1`（039a01 视频授权检测版）已完成 Windows x64 Release 编译与 NSIS 打包，39 项 Rust 测试通过，浏览器测试 20 项通过、1 项跳过。该版新增云端视频授权检测，远程摄像头直播仍未实现。安装包未签名。
 
 ## 已验证范围
 
 已在 Debian 云机完成 Windows x64 MSVC 目标的完整编译、Release 链接和 NSIS 安装包生成。异步 Tauri State 命令采用原生 `Result<ApiResult<T>, ()>`，由 Tauri 解包后向前端返回统一的 ApiResult。
 
-主程序为 PE32+ x86-64 GUI，可独立复制，但运行仍需 WebView2 Runtime。导入表使用 Windows 系统 DLL/UCRT，没有额外的 VC++ Redistributable DLL。NSIS 安装包负责安装和 WebView2 检查，优先使用安装包。
+主程序为 PE32+ x86-64 GUI，运行仍需 WebView2 Runtime。自 0.3.0 起远程视频依赖随包 `ffmpeg/` 目录，不可只复制主 EXE。导入表使用 Windows 系统 DLL/UCRT，没有额外的 VC++ Redistributable DLL。NSIS 安装包负责安装和 WebView2 检查，优先使用安装包。
 
 这是未签名测试包，不是已经通过 Windows 实机验收的正式版本。真实窗口、托盘、开机启动、系统凭据、HA 设备与摄像头须按 WINDOWS_TESTING.md 验收。HA 与 go2rtc 独立运行，不包含在安装包内。
 
@@ -15,6 +17,7 @@
 准备 Node.js 24 LTS、pnpm 11.25.0、Rust stable MSVC、Visual Studio C++ Build Tools（C++ 桌面工作负载和 Windows SDK）和 WebView2 Runtime：
 
 ```powershell
+# 先将下节生成的视频组件放入 src-tauri/resources/ffmpeg/
 pnpm install --frozen-lockfile
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked
 pnpm tauri build --bundles nsis -- --locked
@@ -52,3 +55,17 @@ Tauri CLI 在 Linux 主机上即使打包 Windows 目标也会检测 AppIndicato
 `.github/workflows/windows-build.yml` 提供手动 Windows 构建任务，会生成 exe、安装包、SHA256SUMS.txt 与测试清单。该工作流尚未在 GitHub 执行，不会自动发布 Release。代码推送后，才能在仓库 Actions 使用它。
 
 官方交叉构建依据：https://v2.tauri.app/distribute/windows-installer/#build-windows-apps-on-linux-and-macos
+
+## 0.3.0 的视频组件
+
+云机构建入口会先运行 `python3 scripts/prepare-windows-media.py`。它校验 FFmpeg 8.1.3 官方源码的固定 SHA-256，交叉编译一个只支持本地 H.264/H.265 输入、Media Foundation H.264 编码和 HLS 的 LGPL 共享库构建；不会使用下载的闭源 SDK或现成大型 FFmpeg 二进制。
+
+Linux 构建依赖：`gcc-mingw-w64-x86-64-posix`、`nasm`、`make`、Python 3。可通过系统包管理器安装。此云机将签名 Debian 包解包在 `/workspace/.toolchains/ffmpeg-cross`，未修改系统目录。其他安装位置用 `FFMPEG_CROSS_ROOT` 指定（包含 `usr/bin` 的工具链根），或让工具在 PATH 中可用。
+
+```sh
+python3 scripts/prepare-windows-media.py
+```
+
+输出 `src-tauri/resources/ffmpeg/`，含 EXE、DLL、源码原包、许可、重建脚本与配置/哈希清单；构建产物被 gitignore 排除，Tauri 将其映射到安装目录的 `ffmpeg/`。源码下载需要 `ffmpeg.org`，交叉编译包源沿用环境软件源。Windows 原生构建前可复制 Linux 生成的该目录，或使用已增加 media 前置任务的 GitHub Actions 工作流。
+
+便携分发须将主 EXE 与 `ffmpeg/`、`licenses/`、`THIRD_PARTY_NOTICES.md` 一起打包。H.265 路径需要 Windows Media Foundation H.264 编码器；Windows N/裁剪版可能需要微软 Media Feature Pack。用户不需要自行安装 Java、FFmpeg 或部署网关。真实 Windows 解码、目标摄像头跨网与持续播放仍待验收。
