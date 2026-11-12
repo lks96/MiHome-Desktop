@@ -1,4 +1,4 @@
-use super::{failure, malformed};
+use super::failure;
 use crate::errors::AppError;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -14,7 +14,11 @@ pub struct Receiver {
 impl Receiver {
     pub fn push(&mut self, sequence: u16, payload: &[u8]) -> Result<Vec<Vec<u8>>, AppError> {
         if payload.len() > 2048 {
-            return Err(malformed());
+            return Err(crate::errors::AppError::new(
+                "CS2_FRAGMENT_TOO_LARGE",
+                "摄像头数据分片超过当前支持的大小",
+                false,
+            ));
         }
         let distance = sequence.wrapping_sub(self.next);
         if distance >= 0x8000 {
@@ -28,7 +32,11 @@ impl Receiver {
             .or_insert_with(|| payload.to_vec());
         while let Some(bytes) = self.pending.remove(&self.next) {
             if self.stream.len() + bytes.len() > MAX_MESSAGE + 4 {
-                return Err(malformed());
+                return Err(crate::errors::AppError::new(
+                    "CS2_STREAM_BUFFER_LIMIT",
+                    "摄像头数据重组超过缓冲限制",
+                    false,
+                ));
             }
             self.stream.extend(bytes);
             self.next = self.next.wrapping_add(1);
@@ -41,7 +49,11 @@ impl Receiver {
             }
             let len = u32::from_be_bytes(len) as usize;
             if len == 0 || len > MAX_MESSAGE {
-                return Err(malformed());
+                return Err(crate::errors::AppError::new(
+                    "CS2_STREAM_LENGTH_INVALID",
+                    "摄像头数据消息长度无效",
+                    false,
+                ));
             }
             if self.stream.len() < len + 4 {
                 break;
@@ -49,7 +61,11 @@ impl Receiver {
             self.stream.drain(..4);
             output.push(self.stream.drain(..len).collect());
             if output.len() > 32 {
-                return Err(malformed());
+                return Err(crate::errors::AppError::new(
+                    "CS2_STREAM_BATCH_LIMIT",
+                    "摄像头单个数据批次超过处理限制",
+                    false,
+                ));
             }
         }
         Ok(output)

@@ -131,8 +131,11 @@ pub fn servers(encoded: &str) -> Result<Vec<Ipv4Addr>, AppError> {
     Ok(output)
 }
 
+pub fn is_link_request(input: &[u8]) -> bool {
+    (88..=4092).contains(&input.len()) && input[..2] == [0xa1, 1]
+}
 pub fn linking_reply(input: &[u8], local: SocketAddrV4) -> Result<Vec<u8>, AppError> {
-    if input.len() != 88 || input[0..2] != [0xa1, 1] {
+    if !is_link_request(input) {
         return Err(malformed());
     }
     let mut reply = input.to_vec();
@@ -214,5 +217,20 @@ mod tests {
         for n in 0..88 {
             assert!(linking_reply(&input[..n], SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1)).is_err());
         }
+        let mut confirmation = input;
+        confirmation[1] = 2;
+        assert!(!is_link_request(&confirmation));
+        // Calling the request rewriter on this valid non-request reproduces
+        // the old transport failure. The actor must filter it before rewriting.
+        assert_eq!(
+            linking_reply(&confirmation, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1))
+                .unwrap_err()
+                .code,
+            "CS2_INVALID_PACKET"
+        );
+        let mut extended = input.to_vec();
+        extended.extend([9, 8, 7, 6]);
+        let reply = linking_reply(&extended, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1)).unwrap();
+        assert_eq!(&reply[88..], &[9, 8, 7, 6]);
     }
 }

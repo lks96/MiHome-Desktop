@@ -27,6 +27,8 @@ pub struct StreamStatus {
     pub codec: Option<&'static str>,
     pub playback_url: Option<String>,
     pub error: Option<AppError>,
+    pub auth_diagnostics: miss::AuthDiagnostics,
+    pub transport_diagnostics: Option<relay::TransportDiagnostics>,
 }
 struct Entry {
     did: String,
@@ -69,6 +71,8 @@ impl CameraStreams {
             codec: None,
             playback_url: None,
             error: None,
+            auth_diagnostics: miss::AuthDiagnostics::default(),
+            transport_diagnostics: None,
         };
         let status = Arc::new(Mutex::new(initial.clone()));
         let state = status.clone();
@@ -181,16 +185,25 @@ where
     });
     *connection = Some(relay::dial(&grant.peer, &grant.servers, stage).await?);
     let conn = connection.as_mut().unwrap();
-    status.lock().unwrap().stage = "miss_authenticating";
+    {
+        let mut s = status.lock().unwrap();
+        s.stage = "miss_authenticating";
+        s.transport_diagnostics = Some(conn.diagnostics());
+    }
     conn.command(&miss::auth_message(&grant.public, &grant.sign))
         .await?;
     let auth_end = tokio::time::Instant::now() + Duration::from_secs(12);
     loop {
-        let msg = tokio::time::timeout_at(auth_end, conn.next())
-            .await
-            .map_err(|_| failure("MISS_AUTH_TIMEOUT", "摄像头视频认证超时"))??;
-        if msg.channel == 0 && miss::authenticated(&msg.bytes)? {
-            break;
+        let result = tokio::time::timeout_at(auth_end, conn.next()).await;
+        status.lock().unwrap().transport_diagnostics = Some(conn.diagnostics());
+        let msg = result.map_err(|_| failure("MISS_AUTH_TIMEOUT", "摄像头视频认证超时"))??;
+        if msg.channel == 0 {
+            let mut diagnostic = status.lock().unwrap().auth_diagnostics.clone();
+            let result = miss::authenticated(&msg.bytes, &grant.key, &mut diagnostic);
+            status.lock().unwrap().auth_diagnostics = diagnostic;
+            if result? {
+                break;
+            }
         }
     }
     status.lock().unwrap().stage = "miss_authenticated";
@@ -213,9 +226,10 @@ where
     let mut ready = false;
     let mut headers = zeroize::Zeroizing::new(Vec::new());
     loop {
-        let message = tokio::time::timeout(Duration::from_secs(15), conn.next())
-            .await
-            .map_err(|_| failure("MISS_MEDIA_TIMEOUT", "摄像头未返回视频数据"))??;
+        let result = tokio::time::timeout(Duration::from_secs(15), conn.next()).await;
+        status.lock().unwrap().transport_diagnostics = Some(conn.diagnostics());
+        let message =
+            result.map_err(|_| failure("MISS_MEDIA_TIMEOUT", "摄像头未返回视频数据"))??;
         if received.elapsed() > Duration::from_secs(20) {
             return Err(failure("MISS_MEDIA_TIMEOUT", "摄像头视频数据中断"));
         }

@@ -5,9 +5,12 @@ import { NAlert, NButton, NTag } from 'naive-ui'
 import { call } from '../utils/ipc'
 import type { AppError } from '../types/settings'
 import { useDesktopStore } from '../stores/desktop'
+import { version as clientVersion } from '../../package.json'
 const props = defineProps<{ did: string; online: boolean }>()
 const desktop = useDesktopStore()
-interface Status { sessionId: string; stage: string; failedStage: string | null; elapsedMs: number; attempt: number; mediaPackets: number; keyframes: number; codec: string | null; playbackUrl: string | null; error: AppError | null }
+interface AuthDiagnostics { messages: number; messageKind: string; commandByteOrder: string | null; bodyBytes: number; trailingPaddingBytes: number; encrypted: boolean; jsonShape: string; jsonErrorCategory: string | null }
+interface TransportDiagnostics { linkRequests: number; linkNonRequests: number; commandMessages: number; mediaMessages: number; streamErrorChannel: number | null }
+interface Status { sessionId: string; stage: string; failedStage: string | null; elapsedMs: number; attempt: number; mediaPackets: number; keyframes: number; codec: string | null; playbackUrl: string | null; error: AppError | null; authDiagnostics?: AuthDiagnostics; transportDiagnostics?: TransportDiagnostics | null }
 const status = ref<Status | null>(null)
 const video = ref<HTMLVideoElement | null>(null)
 const running = ref(false)
@@ -18,7 +21,14 @@ const clientErrorCode = ref<string | null>(null)
 const copied = ref('')
 const labels: Record<string, string> = { provisioning: '正在获取视频授权', rendezvous: '正在连接会合服务', relay_candidate: '正在选择远程节点', relay_request: '正在等待摄像头加入', relay_ready: '远程节点已就绪', session_linking: '正在连接摄像头会话', session_established: '远程会话已建立', miss_authenticating: '正在验证视频权限', miss_authenticated: '视频权限已确认', waiting_media: '正在等待视频', preparing_video: '正在处理视频', media_ready: '正在等待画面', failed: '连接失败', stopped: '已停止' }
 const label = computed(() => playing.value ? '正在播放' : status.value ? labels[status.value.stage] ?? '正在连接' : '尚未播放')
-const diagnostic = computed(() => JSON.stringify({ diagnosticSchema: 2, model: 'chuangmi.camera.039a01', transport: 'cs2', stage: status.value?.stage ?? 'idle', failedStage: status.value?.failedStage ?? null, errorCode: status.value?.error?.code ?? clientErrorCode.value, elapsedMs: status.value?.elapsedMs ?? 0, mediaPackets: status.value?.mediaPackets ?? 0, keyframes: status.value?.keyframes ?? 0, codec: status.value?.codec ?? null, decodedFrames: decodedFrames.value, remotePlaybackVerified: decodedFrames.value > 0 }, null, 2))
+const diagnostic = computed(() => {
+  const a = status.value?.authDiagnostics
+  const t = status.value?.transportDiagnostics
+  return JSON.stringify({ diagnosticSchema: 3, clientVersion, model: 'chuangmi.camera.039a01', transport: 'cs2', stage: status.value?.stage ?? 'idle', failedStage: status.value?.failedStage ?? null, errorCode: status.value?.error?.code ?? clientErrorCode.value, elapsedMs: status.value?.elapsedMs ?? 0, mediaPackets: status.value?.mediaPackets ?? 0, keyframes: status.value?.keyframes ?? 0, codec: status.value?.codec ?? null, decodedFrames: decodedFrames.value, remotePlaybackVerified: decodedFrames.value > 0,
+    authDiagnostics: a ? { messages: a.messages, messageKind: a.messageKind, commandByteOrder: a.commandByteOrder, bodyBytes: a.bodyBytes, trailingPaddingBytes: a.trailingPaddingBytes, encrypted: a.encrypted, jsonShape: a.jsonShape, jsonErrorCategory: a.jsonErrorCategory } : null,
+    transportDiagnostics: t ? { linkRequests: t.linkRequests, linkNonRequests: t.linkNonRequests, commandMessages: t.commandMessages, mediaMessages: t.mediaMessages, streamErrorChannel: t.streamErrorChannel } : null,
+  }, null, 2)
+})
 let generation = 0
 let alive = true
 let id: string | null = null

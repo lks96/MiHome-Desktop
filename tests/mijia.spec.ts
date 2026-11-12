@@ -243,3 +243,28 @@ test('hidden desktop stops remote video and prevents automatic reopening', async
   await expect(page.getByRole('button',{name:'远程播放',exact:true})).toBeEnabled()
   expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStarts)).toEqual(['camera-1'])
 })
+
+test('auth diagnostics expose only structure and deterministic parse failures do not auto-retry', async ({ page }) => {
+  await page.clock.install()
+  await mijiaFixture(page); await page.goto('/'); await scan(page)
+  await page.evaluate(() => {
+    const s=(window as any).__mijiaTest
+    s.finish({ok:true,data:{state:'authorized'}})
+    s.remote={...s.remote,stage:'failed',failedStage:'miss_authenticating',error:{code:'MISS_AUTH_JSON_INVALID',message:'摄像头认证响应格式暂不兼容，请复制连接结果',retryable:false},
+      authDiagnostics:{messages:1,messageKind:'auth_response',commandByteOrder:'le',bodyBytes:128,trailingPaddingBytes:2,encrypted:false,jsonShape:'object',jsonErrorCategory:'syntax',rawResponse:'private-auth-response',sign:'private-signature'},
+      transportDiagnostics:{linkRequests:2,linkNonRequests:1,commandMessages:1,mediaMessages:0,streamErrorChannel:null,relayToken:'private-relay-token'},
+    }
+  })
+  await page.locator('[data-mi-device="camera-1"]').getByRole('button',{name:'查看状态与控制'}).click()
+  await page.getByRole('button',{name:'远程播放',exact:true}).click()
+  await expect(page.getByText('摄像头认证响应格式暂不兼容，请复制连接结果',{exact:true})).toBeVisible()
+  await page.getByText('连接结果',{exact:true}).click()
+  const report=page.locator('[data-remote-camera-result]')
+  await expect(report).toContainText('"diagnosticSchema": 3')
+  await expect(report).toContainText('"clientVersion": "0.3.1"')
+  await expect(report).toContainText('"commandByteOrder": "le"')
+  await expect(report).toContainText('"linkNonRequests": 1')
+  await expect(report).not.toContainText('private-')
+  await page.clock.runFor(15000)
+  expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStarts)).toEqual(['camera-1'])
+})

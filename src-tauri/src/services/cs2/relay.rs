@@ -199,12 +199,23 @@ async fn handshake(
 
 pub struct Message {
     pub channel: u8,
-    pub bytes: Vec<u8>,
+    pub bytes: Zeroizing<Vec<u8>>,
+}
+/// Counts only. Never include packet bytes, addresses, UID or relay tokens.
+#[derive(Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransportDiagnostics {
+    pub link_requests: u32,
+    pub link_non_requests: u32,
+    pub command_messages: u32,
+    pub media_messages: u32,
+    pub stream_error_channel: Option<u8>,
 }
 pub struct Connection {
     outgoing: mpsc::Sender<Zeroizing<Vec<u8>>>,
     incoming: mpsc::Receiver<Message>,
     task: Option<JoinHandle<Result<(), AppError>>>,
+    diagnostics: Arc<std::sync::Mutex<TransportDiagnostics>>,
 }
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -222,11 +233,20 @@ impl Connection {
         let (tx, incoming) = mpsc::channel(64);
         let (linked, wait_link) = oneshot::channel();
         stage("session_linking");
-        let task = tokio::spawn(transport(socket, local, rx, tx, linked));
+        let diagnostics = Arc::new(std::sync::Mutex::new(TransportDiagnostics::default()));
+        let task = tokio::spawn(transport(
+            socket,
+            local,
+            rx,
+            tx,
+            linked,
+            diagnostics.clone(),
+        ));
         let mut conn = Self {
             outgoing,
             incoming,
             task: Some(task),
+            diagnostics,
         };
         match tokio::time::timeout(Duration::from_secs(12), wait_link).await {
             Ok(Ok(())) => {
@@ -269,6 +289,9 @@ impl Connection {
         }
         Err(failure("CS2_CHANNEL_CLOSED", "摄像头远程连接已中断"))
     }
+    pub fn diagnostics(&self) -> TransportDiagnostics {
+        self.diagnostics.lock().unwrap().clone()
+    }
     pub async fn close(&mut self) {
         // Closing the command channel lets the actor send the protocol CLOSE.
         let (replacement, _) = mpsc::channel(1);
@@ -295,6 +318,7 @@ async fn transport(
     mut commands: mpsc::Receiver<Zeroizing<Vec<u8>>>,
     messages: mpsc::Sender<Message>,
     linked: oneshot::Sender<()>,
+    diagnostics: Arc<std::sync::Mutex<TransportDiagnostics>>,
 ) -> Result<(), AppError> {
     let mut linked = Some(linked);
     let mut sequence = 0u16;
@@ -323,17 +347,23 @@ async fn transport(
                 let Some((kind,body))=parse(&buffer[..n]) else { continue; };
                 last=Instant::now();
                 match kind {
-                    LINK => {
+                    LINK if is_link_request(body) => {
+                        {let mut d=diagnostics.lock().unwrap();d.link_requests=d.link_requests.saturating_add(1);}
                         let reply=linking_reply(body,local)?;
                         socket.send(&frame(LINK,&reply)).await.map_err(|_|io_error())?;
                         if let Some(tx)=linked.take() { let _=tx.send(()); }
                     }
+                    // 0x28 also carries replies/notifications. Only requests
+                    // require rewriting; a confirmation must not tear down MISS.
+                    LINK => {let mut d=diagnostics.lock().unwrap();d.link_non_requests=d.link_non_requests.saturating_add(1);}
                     DATA if body.len()>=4 && body[0]==0xd1 && matches!(body[1],0|2) => {
                         let channel=body[1]; let seq=u16::from_be_bytes([body[2],body[3]]);
                         socket.send(&frame(ACK,&[0xd1,channel,0,1,body[2],body[3]])).await.map_err(|_|io_error())?;
                         let rx=if channel==0 { &mut command_rx } else { &mut media_rx };
-                        for bytes in rx.push(seq,&body[4..])? {
-                            messages.try_send(Message {channel,bytes}).map_err(|_|failure("CS2_BACKPRESSURE","视频处理速度不足，请停止后重试"))?;
+                        let batch=rx.push(seq,&body[4..]).map_err(|e|{diagnostics.lock().unwrap().stream_error_channel=Some(channel);e})?;
+                        for bytes in batch {
+                            {let mut d=diagnostics.lock().unwrap();if channel==0 {d.command_messages=d.command_messages.saturating_add(1);}else {d.media_messages=d.media_messages.saturating_add(1);}}
+                            messages.try_send(Message {channel,bytes:Zeroizing::new(bytes)}).map_err(|_|failure("CS2_BACKPRESSURE","视频处理速度不足，请停止后重试"))?;
                         }
                     }
                     ACK if body.len()>=4 && body[..2]==[0xd1,0] => {
@@ -384,6 +414,7 @@ mod tests {
             let mut registered = false;
             let mut dropped = false;
             let mut linked = false;
+            let mut confirmations_sent = false;
             loop {
                 tokio::select! {
                     result=central.recv_from(&mut a)=> {
@@ -400,13 +431,22 @@ mod tests {
                             REGISTER=>{assert_eq!(body.len(),28);registered=true;}
                             HELLO=>{assert!(registered);node.send_to(&frame(HELLO_ACK,&[]),client).await.unwrap();}
                             PORT=>{let mut payload=vec![5,6,7,8];payload.extend(relay.port().to_be_bytes());node.send_to(&frame(PORT_ACK,&payload),client).await.unwrap();}
-                            LINK=>{assert_eq!(body[1],2);linked=true;}
+                            LINK=>{
+                                assert_eq!(body[1],2);linked=true;
+                                if !confirmations_sent {
+                                    confirmations_sent=true;
+                                    node.send_to(&frame(LINK,body),client).await.unwrap();
+                                    // Duplicate request and reply must remain idempotent.
+                                    let mut repeated=body.to_vec();repeated[1]=1;
+                                    node.send_to(&frame(LINK,&repeated),client).await.unwrap();
+                                }
+                            }
                             DATA=>{
                                 assert!(linked);
                                 if !dropped {dropped=true;continue;}
                                 node.send_to(&frame(ACK,&[0xd1,0,0,1,body[2],body[3]]),client).await.unwrap();
-                                let response=b"\0\0\x01\x01{\"result\":\"success\"}";
-                                let mut msg=vec![0xd1,0,0,0];msg.extend((response.len() as u32).to_be_bytes());msg.extend(response);
+                                let mut response=0x101u32.to_le_bytes().to_vec();response.extend(b"{\"result\":\"success\",\"channel\":\"private-channel\"}\0\0");
+                                let mut msg=vec![0xd1,0,0,0];msg.extend((response.len() as u32).to_be_bytes());msg.extend(&response);
                                 node.send_to(&frame(DATA,&msg),client).await.unwrap();
                             }
                             CLOSE=>return dropped && linked,
@@ -431,7 +471,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(crate::services::miss::authenticated(&msg.bytes).unwrap());
+        let mut auth = crate::services::miss::AuthDiagnostics::default();
+        assert!(crate::services::miss::authenticated(&msg.bytes, &[0; 32], &mut auth).unwrap());
+        assert_eq!(auth.command_byte_order, Some("le"));
+        assert!(connection.diagnostics().link_non_requests >= 1);
+        assert!(connection.diagnostics().link_requests >= 2);
         connection.close().await;
         assert!(
             tokio::time::timeout(Duration::from_secs(1), mock)
