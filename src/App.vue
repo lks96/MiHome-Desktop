@@ -11,12 +11,25 @@ const EntityControl = defineAsyncComponent(() => import('./components/EntityCont
 const ScenesView = defineAsyncComponent(() => import('./views/ScenesView.vue'))
 const MonitorView = defineAsyncComponent(() => import('./views/MonitorView.vue'))
 const DevicesView = defineAsyncComponent(() => import('./views/DevicesView.vue'))
+const MijiaHome = defineAsyncComponent(() => import('./views/MijiaHome.vue'))
+import { useMijiaStore } from './stores/mijia'
 import { isTauri } from '@tauri-apps/api/core'
 import { useDevicesStore } from './stores/devices'
 import { useConnectionStore } from './stores/connection'
 import { useDesktopStore } from './stores/desktop'
 import { useSettingsStore } from './stores/settings'
 
+const mijia = useMijiaStore()
+function preferredSource(): 'mijia' | 'ha' {
+  try { return localStorage.getItem('mihome.source') === 'ha' ? 'ha' : 'mijia' } catch { return 'mijia' }
+}
+const source = ref(preferredSource())
+function selectSource(value: 'mijia' | 'ha') {
+  source.value = value
+  active.value = value === 'ha' ? 'settings' : 'overview'
+  try { localStorage.setItem('mihome.source', value) } catch { /* Non-secret display preference is optional. */ }
+}
+const connectionLabel = computed(() => source.value === 'mijia' ? mijia.snapshot.loggedIn ? '米家已登录' : '等待米家扫码登录' : connection.label)
 const settingsStore = useSettingsStore()
 const desktop = useDesktopStore()
 const connection = useConnectionStore()
@@ -58,14 +71,17 @@ const title = computed(() => [...nav, { id: 'settings' as const, label: '设置'
           </button>
         </nav>
         <div class="sidebar-bottom">
+          <button class="nav-item" @click="selectSource(source === 'mijia' ? 'ha' : 'mijia')"><NIcon :component="WifiOutline" :size="19" /><span>{{ source === 'mijia' ? 'Home Assistant（高级）' : '返回米家扫码接入' }}</span></button>
           <button class="nav-item" :class="{ active: active === 'settings' }" @click="active = 'settings'"><NIcon :component="SettingsOutline" :size="19" /><span>设置</span></button>
-          <div class="connection-card"><span class="connection-dot"></span><div><strong>{{ connection.saved?.name ?? 'Home Assistant' }}</strong><small>{{ connection.label }}</small></div><NIcon :component="WifiOutline" :size="17" /></div>
+          <div class="connection-card"><span class="connection-dot"></span><div><strong>{{ source === 'mijia' ? '米家账号直连' : connection.saved?.name ?? 'Home Assistant' }}</strong><small>{{ connectionLabel }}</small></div><NIcon :component="WifiOutline" :size="17" /></div>
         </div>
       </aside>
       <main class="main-area">
-        <header class="topbar"><NButton quaternary circle @click="collapsed = !collapsed"><template #icon><NIcon :component="MenuOutline" /></template></NButton><div class="breadcrumbs">Mi Home Desktop <span>/</span> <strong>{{ title }}</strong></div><div class="topbar-right"><NTag :bordered="false" round size="small" :type="connection.status.state === 'connected' ? 'success' : 'default'">{{ connection.label }}</NTag><div class="avatar">M</div></div></header>
+        <header class="topbar"><NButton quaternary circle @click="collapsed = !collapsed"><template #icon><NIcon :component="MenuOutline" /></template></NButton><div class="breadcrumbs">Mi Home Desktop <span>/</span> <strong>{{ title }}</strong></div><div class="topbar-right"><NTag :bordered="false" round size="small" :type="(source === 'mijia' ? mijia.snapshot.loggedIn : connection.status.state === 'connected') ? 'success' : 'default'">{{ connectionLabel }}</NTag><div class="avatar">M</div></div></header>
         <section class="content">
-          <template v-if="active === 'overview'">
+          <MijiaHome v-if="source === 'mijia' && ['overview', 'devices', 'monitor'].includes(active)" :cameras-only="active === 'monitor'" @advanced="selectSource('ha')" />
+          <div v-else-if="source === 'mijia' && active === 'scenes'" class="empty-section"><h1>米家场景</h1><p>米家云场景尚未接入。你可以先在设备中心直接控制受支持的设备。</p><NButton type="primary" @click="active = 'devices'">查看米家设备</NButton></div>
+          <template v-else-if="active === 'overview'">
             <div class="page-heading"><div><div class="eyebrow">SMART HOME CONTROL</div><h1>欢迎回来</h1><p>{{ connection.status.state === 'connected' ? '实时连接已建立，设备状态正在同步。' : '连接 Home Assistant，开始管理你的智能家居。' }}</p></div><NButton type="primary" size="large" @click="active = 'settings'">配置连接</NButton></div>
             <div class="hero-card"><div class="hero-copy"><div class="hero-kicker">你的智能家居，一目了然</div><h2>让每个设备<br>都触手可及。</h2><p>{{ connection.status.state === 'connected' ? '已连接你的 Home Assistant 实例，前往设备中心查看实时实体。' : '连接 Home Assistant 后，你的设备、房间和场景将在这里汇集。' }}</p><NButton secondary @click="active = 'settings'">前往连接设置 <span class="arrow">→</span></NButton></div><div class="hero-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="house"><div class="roof"></div><div class="house-body"><div class="window"></div><div class="door"></div></div></div><div class="spark spark-one">✦</div><div class="spark spark-two">✧</div></div></div>
             <div class="section-heading"><div><h2>空间概览</h2><p>{{ connection.syncing ? '正在同步实体…' : connection.label }}</p></div><span class="muted">{{ connection.status.state === 'connected' ? '实时状态' : '等待连接或恢复同步' }}</span></div>
@@ -76,7 +92,7 @@ const title = computed(() => [...nav, { id: 'settings' as const, label: '设置'
           <MonitorView v-else-if="active === 'monitor'" :active="desktop.visible" />
           <DevicesView v-else-if="active === 'devices'" />
           <ScenesView v-else-if="active === 'scenes'" />
-          <SettingsView v-else-if="active === 'settings'" />
+          <SettingsView v-else-if="active === 'settings'" :advanced="source === 'ha'" />
           <div v-else class="empty-section"><div class="empty-icon"><NIcon :component="nav.find(item => item.id === active)?.icon ?? SettingsOutline" :size="28" /></div><div class="eyebrow">{{ title.toUpperCase() }}</div><h1>{{ title }}</h1><p>此功能将在后续开发阶段接入真实 Home Assistant 数据。</p><NButton type="primary" @click="active = 'overview'">返回总览</NButton></div>
           <footer>Mi Home Desktop <span>·</span> 本地优先的智能家居控制台</footer>
         </section>

@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 async function phaseFiveFixture(page: Page) {
   await page.addInitScript(()=>{
+    localStorage.setItem('mihome.source', 'ha')
     const w=window as any
     const callbacks:Record<number,(value:unknown)=>void>={};const events:Record<string,number>={};let id=0
     const favorites:Record<string,boolean>={}

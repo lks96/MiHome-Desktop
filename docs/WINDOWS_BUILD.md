@@ -1,5 +1,7 @@
 # Windows 测试包构建
 
+> 2026-11-11：下文完整交叉编译与打包记录对应已发布的 `v0.1.0-test.1`（HA 接入版）。新增米家扫码代码已通过前端和非桌面 Rust 测试，但新环境在下载微软 CRT/SDK 时收到代理 403，Windows 编译与新安装包尚未完成。不能将旧包的验证记录用于证明新扫码代码已通过 Windows 构建。
+
 ## 已验证范围
 
 已在 Debian 云机完成 Windows x64 MSVC 目标的完整编译、Release 链接和 NSIS 安装包生成。异步 Tauri State 命令采用原生 `Result<ApiResult<T>, ()>`，由 Tauri 解包后向前端返回统一的 ApiResult。

@@ -7,4 +7,5 @@ pub mod devices;
 pub mod cameras;
 
 pub mod diagnostics;
+pub mod mijia;
 pub mod scenes;

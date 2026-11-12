@@ -3,6 +3,9 @@ use zeroize::Zeroizing;
 
 pub trait CredentialStore: Send + Sync {
     fn read(&self, reference: &str) -> Result<Zeroizing<String>, AppError>;
+    fn read_optional(&self, reference: &str) -> Result<Option<Zeroizing<String>>, AppError> {
+        self.read(reference).map(Some)
+    }
     fn write(&self, reference: &str, token: &str) -> Result<(), AppError>;
     fn delete(&self, reference: &str) -> Result<(), AppError>;
 }
@@ -17,6 +20,15 @@ fn credential_error() -> AppError {
 }
 #[cfg(windows)]
 impl CredentialStore for SystemCredentials {
+    fn read_optional(&self, reference: &str) -> Result<Option<Zeroizing<String>>, AppError> {
+        match keyring::Entry::new("com.lks96.mihome-desktop", reference)
+            .and_then(|entry| entry.get_password())
+        {
+            Ok(value) => Ok(Some(Zeroizing::new(value))),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(_) => Err(credential_error()),
+        }
+    }
     fn read(&self, reference: &str) -> Result<Zeroizing<String>, AppError> {
         keyring::Entry::new("com.lks96.mihome-desktop", reference)
             .and_then(|entry| entry.get_password())
@@ -57,6 +69,15 @@ pub(crate) struct MemoryCredentials(
 );
 #[cfg(test)]
 impl CredentialStore for MemoryCredentials {
+    fn read_optional(&self, reference: &str) -> Result<Option<Zeroizing<String>>, AppError> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .get(reference)
+            .cloned()
+            .map(Zeroizing::new))
+    }
     fn read(&self, reference: &str) -> Result<Zeroizing<String>, AppError> {
         self.0
             .lock()

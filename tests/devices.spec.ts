@@ -4,6 +4,7 @@ import { test, expect, type Page } from '@playwright/test'
 // HTTP/WebSocket servers and SQLite; no fixture data is shipped in the app.
 async function desktopFixture(page: Page) {
   await page.addInitScript(() => {
+    localStorage.setItem('mihome.source', 'ha')
     const w = window as any
     const callbacks: Record<number, (value: unknown) => void> = {}
     const events: Record<string, number> = {}
@@ -94,6 +95,7 @@ test('favorites, local names, hidden recovery and search use client preferences'
 })
 
 test('browser preview clearly disables saving credentials', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('mihome.source', 'ha'))
   await page.goto('/')
   await page.getByRole('button', { name: '配置连接', exact: true }).click()
   await expect(page.getByRole('button', { name: '保存并连接', exact: true })).toBeDisabled()

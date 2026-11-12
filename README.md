@@ -1,6 +1,12 @@
 # Mi Home Desktop
 
-Windows 智能家居桌面客户端，通过 Home Assistant 管理已接入的米家设备，并为兼容摄像头提供可选监控能力。
+基于 Rust、Tauri 2 和 Vue 3 的 Windows 智能家居桌面客户端。
+
+开发版默认采用米家账号直连：选择地区 → 用米家 App 扫码确认 → 自动同步家庭、房间与设备 → 控制受支持的 MIoT 能力。记住登录使用 Windows 凭据管理器，无需搭建 Home Assistant 或填写令牌。Home Assistant 与 go2rtc 保留在高级接入中。
+
+米家直连目前通过本地协议及浏览器测试，**尚未完成真实账号扫码和 Windows 实机验证**。摄像头可自动识别，直接直播与米家云场景尚未实现；旧版及蓝牙设备的直接控制取决于云端能力。此前 GitHub 的 `v0.1.0-test.1` 安装包仍是 HA 接入版，不包含本次开发中的扫码功能。
+
+[米家直连说明](docs/MIJIA_DIRECT.md)
 
 ## 开发环境
 

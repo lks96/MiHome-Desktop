@@ -2,6 +2,7 @@ import { test, expect, type Page } from '@playwright/test'
 
 async function cameraFixture(page: Page, snapshot = false, delayedStart = false, realPeer = false, localFrames = false) {
   await page.addInitScript(({ snapshot, delayedStart, realPeer, localFrames }) => {
+    localStorage.setItem('mihome.source', 'ha')
     const w = window as any
     let sequence = 0
     const events:Record<string,number>={}

@@ -5,6 +5,8 @@ pub mod database;
 mod desktop;
 pub mod errors;
 pub mod logging;
+#[cfg(feature = "desktop")]
+mod mijia_commands;
 pub mod models;
 pub mod security;
 pub mod services;
@@ -65,6 +67,9 @@ pub fn run() {
             app.manage(services::cameras::CameraSessions::default());
             app.manage(database.clone());
             app.manage(service.clone());
+            app.manage(services::mijia::MiCloud::new(Arc::new(
+                security::SystemCredentials,
+            )));
             tauri::async_runtime::spawn(async move {
                 let result = async {
                     if database.settings().await?.auto_connect
@@ -86,6 +91,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            mijia_commands::mijia_restore,
+            mijia_commands::mijia_start_login,
+            mijia_commands::mijia_poll_login,
+            mijia_commands::mijia_cancel_login,
+            mijia_commands::mijia_logout,
+            mijia_commands::mijia_sync,
+            mijia_commands::mijia_get_properties,
+            mijia_commands::mijia_set_property,
             commands::settings_get,
             commands::settings_update,
             commands::settings_get_app_info,

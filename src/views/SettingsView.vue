@@ -6,6 +6,7 @@ import ConnectionSettings from '../components/ConnectionSettings.vue'
 import CameraSettings from '../components/CameraSettings.vue'
 import DiagnosticsPanel from '../components/DiagnosticsPanel.vue'
 import { useDesktopStore } from '../stores/desktop'
+defineProps<{ advanced?: boolean }>()
 const store = useSettingsStore()
 const desktop = useDesktopStore()
 const draft = reactive({ ...store.settings })
@@ -27,18 +28,17 @@ const themes = [{ label: '浅色', value: 'light' }, { label: '深色', value: '
     <NButton v-if="store.error.retryable" size="small" :disabled="store.loading || store.saving" @click="store.load">重新读取</NButton>
   </NAlert>
   <NAlert v-if="saved" class="settings-alert" type="success">设置已保存到本地数据库。</NAlert>
-  <ConnectionSettings />
-  <CameraSettings />
+  <details class="panel settings-panel" :open="advanced"><summary>高级接入 · Home Assistant 与视频网关</summary><ConnectionSettings /><CameraSettings /></details>
   <NSpin :show="store.loading">
     <section class="panel settings-panel">
-      <h2>外观与连接偏好</h2><p class="settings-note">外观保存后立即应用；连接偏好将在下次建立连接时生效。</p>
+      <h2>{{ advanced ? '外观与连接偏好' : '外观与桌面偏好' }}</h2><p class="settings-note">{{ advanced ? '外观保存后立即应用；HA 连接偏好将在下次建立连接时生效。' : '外观保存后立即应用。米家登录页勾选“记住登录”即可在下次启动时自动连接。' }}</p>
       <NForm label-placement="left" label-width="150" :disabled="!store.loaded || store.saving || store.loading">
         <NFormItem label="外观主题"><NSelect v-model:value="draft.theme" :options="themes" /></NFormItem>
-        <NFormItem label="请求超时（秒）" :validation-status="timeoutValid ? undefined : 'error'" :feedback="timeoutValid ? undefined : '请输入 1 至 120 之间的整数'">
+        <template v-if="advanced"><NFormItem label="请求超时（秒）" :validation-status="timeoutValid ? undefined : 'error'" :feedback="timeoutValid ? undefined : '请输入 1 至 120 之间的整数'">
           <NInputNumber :value="draft.requestTimeout" :min="1" :max="120" :precision="0" @update:value="draft.requestTimeout = $event ?? 0" />
         </NFormItem>
         <NFormItem label="启动时自动连接"><NSwitch v-model:value="draft.autoConnect" /></NFormItem>
-        <NFormItem label="断线后自动重连"><NSwitch v-model:value="draft.autoReconnect" /></NFormItem>
+        <NFormItem label="断线后自动重连"><NSwitch v-model:value="draft.autoReconnect" /></NFormItem></template>
         <NFormItem label="关闭窗口后留在托盘"><NSwitch v-model:value="draft.closeToTray" aria-label="关闭窗口后留在托盘" :disabled="!desktop.status?.trayAvailable && !draft.closeToTray" /></NFormItem>
         <NFormItem label="Windows 开机启动"><NSwitch v-model:value="draft.autoStart" aria-label="Windows 开机启动" :disabled="!desktop.status?.autoStartSupported" /></NFormItem>
       </NForm>
