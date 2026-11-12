@@ -30,8 +30,8 @@
 
 Playwright 使用测试目录内的 IPC fixture 验证首页、手机确认后的设备展示、控制、摄像头能力提示、取消后的迟到响应和凭据故障。fixture 设备不会进入产品。
 
-当前云环境拒绝连接小米账号与型号说明服务，因此尚未完成真实手机扫码、真实设备控制和 Windows/WebView2 运行验收；完整 Windows 新包也尚未生成。不得把本地测试通过写成真实米家兼容验证。此前发布的 `v0.1.0-test.1` 安装包仍为 HA 版。
+`v0.2.0-test.1` 已完成 Windows x64 Release 编译和 NSIS 安装包生成，并通过真实小米接口获取二维码的检查。小米会返回地区账号与长轮询子域名（例如 `sgp.lp.account.xiaomi.com`），本版已兼容这些官方账号子域名，同时继续拒绝第三方回调、明文 HTTP、异常端口与带用户信息的 URL。手机确认后的授权、真实设备控制和 Windows/WebView2 桌面运行仍待实机验收；不能把二维码获取成功视为完整登录及全部设备兼容验证。
 
-真实联调需允许 `account.xiaomi.com`、`sts.api.io.mi.com`、`api.io.mi.com`（以及所选地区对应的 `de/us/ru/tw/sg/in/i2.api.io.mi.com`）和 `miot-spec.org`。Windows 交叉构建另外需要 `snapshot.debian.org` 与 `download.visualstudio.microsoft.com`。不需要把账号密码或令牌提供给开发者。
+真实联调需允许 `account.xiaomi.com` 及 `*.account.xiaomi.com`、`sts.api.io.mi.com`、`api.io.mi.com`（以及所选地区对应的 `de/us/ru/tw/sg/in/i2.api.io.mi.com`）和 `miot-spec.org`。Windows 交叉构建另外需要 `snapshot.debian.org` 与 `download.visualstudio.microsoft.com`。不需要把账号密码或令牌提供给开发者。
 
 协议行为参考社区项目 [Xiaomi Cloud Tokens Extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor) 的 QR 流程和 [Xiaomi Miot](https://github.com/al-one/hass-xiaomi-miot) 的米家云/MIoT 请求。小米服务接口发生变化时需重新验证。

@@ -92,7 +92,10 @@ fn checked_url(raw: &str, callback: bool) -> Result<Url, AppError> {
     let valid_host = if callback {
         matches!(url.host_str(), Some("sts.api.io.mi.com" | "api.io.mi.com"))
     } else {
-        url.host_str() == Some("account.xiaomi.com")
+        // Xiaomi assigns regional account/long-poll hosts, e.g. sgp.lp.account.xiaomi.com.
+        url.host_str().is_some_and(|host| {
+            host == "account.xiaomi.com" || host.ends_with(".account.xiaomi.com")
+        })
     };
     if url.scheme() != "https"
         || url.port_or_known_default() != Some(443)
@@ -944,6 +947,8 @@ mod tests {
         for url in [
             "http://account.xiaomi.com/qr",
             "https://account.xiaomi.com.evil.test/qr",
+            "https://evilaccount.xiaomi.com/qr",
+            "https://account.xiaomi.com.evil.test/lp/s",
             "https://user@account.xiaomi.com/qr",
             "https://account.xiaomi.com:444/qr",
             "https://127.0.0.1/qr",
@@ -960,6 +965,8 @@ mod tests {
         );
         assert!(checked_url("https://sts.api.io.mi.com/sts?ticket=fixture", true).is_ok());
         assert!(checked_url("https://account.xiaomi.com/sts", true).is_err());
+        assert!(checked_url("https://sgp.lp.account.xiaomi.com/lp/s?k=fixture", false).is_ok());
+        assert!(checked_url("https://sgp.account.xiaomi.com/longPolling/login", false).is_ok());
     }
     #[test]
     fn spec_filters_secrets_and_checks_types_steps_enums_and_write_access() {
@@ -1022,9 +1029,9 @@ mod tests {
                     .unwrap();
                 let mut headers = String::new();
                 let response = match route {
-                    "/longPolling/loginUrl" => format!("&&&START&&&{}",json!({"qr":"https://account.xiaomi.com/qr","lp":"https://account.xiaomi.com/longPolling/login","timeout":180})).into_bytes(),
+                    "/longPolling/loginUrl" => format!("&&&START&&&{}",json!({"qr":"https://account.xiaomi.com/qr","lp":"https://sgp.lp.account.xiaomi.com/lp/s?k=fixture","timeout":180})).into_bytes(),
                     "/qr" => b"\x89PNG\r\n\x1a\nfixture".to_vec(),
-                    "/longPolling/login" => {
+                    "/lp/s" => {
                         if delay_poll { tokio::time::sleep(Duration::from_millis(150)).await; }
                         json!({"code":0,"userId":"12345678","ssecurity":SECURITY,"location":if malicious_callback {"https://evil.test/steal"} else {"https://sts.api.io.mi.com/sts"}}).to_string().into_bytes()
                     },
