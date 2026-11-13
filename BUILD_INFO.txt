@@ -1,0 +1,14 @@
+MiHome Desktop v0.3.2-cs2.1
+Source: e4a9645bf23781adecc5bfa152b85ac3f4c37924
+Source URL: https://github.com/lks96/MiHome-Desktop/commit/e4a9645bf23781adecc5bfa152b85ac3f4c37924
+Built UTC: 2026-11-13T01:30:30.994387+00:00
+Target: x86_64-pc-windows-msvc; Windows GUI; PE version 0.3.2.0
+Rust services: 59 passed
+Browser UI tests: 29 passed, 1 existing WebRTC test skipped; real HLS decoding and window/quality flows covered
+Windows x64 Release compile and NSIS bundle: passed
+Changes: timestamped MPEG-TS input preserves camera PTS instead of fixed 20fps; lower latency encoder/buffering; dedicated viewer, fullscreen, floating window and three quality levels
+Diagnostics: schema 4; safe timing/receive/playback metrics; window-owned session lifetime
+FFmpeg: 8.1.3 minimal LGPL shared build; source/config/checksums bundled
+Target camera: chuangmi.camera.039a01; user firmware 5.1.6_0433
+v0.3.1 real camera WAN H.265 playback: verified by user; new smoothness, native windows and 30-minute stability require Windows verification
+Video only; installer unsigned; portable package requires all included files
