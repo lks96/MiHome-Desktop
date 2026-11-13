@@ -2,27 +2,67 @@ use crate::{
     errors::ApiResult,
     services::mijia::{LoginProgress, MiCloud, MiProperty, MiSnapshot, QrLogin},
 };
+use tauri::Manager;
 
 #[tauri::command]
 pub async fn camera_remote_start(
     service: tauri::State<'_, MiCloud>,
+    window: tauri::WebviewWindow,
+    windows: tauri::State<'_, crate::camera_windows::CameraWindows>,
     did: String,
+    quality: Option<u8>,
 ) -> Result<ApiResult<crate::services::camera_stream::StreamStatus>, ()> {
-    Ok(service.camera_remote_start(&did).await.into())
+    if !windows.permits(window.label(), &did).await {
+        return Ok(Err(crate::errors::AppError::invalid_input(
+            "此窗口不能播放该设备",
+        ))
+        .into());
+    }
+    let result = service
+        .camera_remote_start_owned(&did, quality.unwrap_or(2), window.label())
+        .await;
+    if let Ok(status) = &result {
+        if window
+            .app_handle()
+            .get_webview_window(window.label())
+            .is_none()
+        {
+            service
+                .cameras
+                .stop_owned(&status.session_id, window.label())
+                .await;
+            return Ok(Err(crate::errors::AppError::new(
+                "CAMERA_WINDOW_GONE",
+                "观看窗口已关闭",
+                false,
+            ))
+            .into());
+        }
+    }
+    Ok(result.into())
 }
 #[tauri::command]
 pub async fn camera_remote_status(
     service: tauri::State<'_, MiCloud>,
+    window: tauri::WebviewWindow,
     session_id: String,
 ) -> Result<ApiResult<crate::services::camera_stream::StreamStatus>, ()> {
-    Ok(service.cameras.status(&session_id).await.into())
+    Ok(service
+        .cameras
+        .status_owned(&session_id, window.label())
+        .await
+        .into())
 }
 #[tauri::command]
 pub async fn camera_remote_stop(
     service: tauri::State<'_, MiCloud>,
+    window: tauri::WebviewWindow,
     session_id: String,
 ) -> Result<ApiResult<bool>, ()> {
-    service.cameras.stop(&session_id).await;
+    service
+        .cameras
+        .stop_owned(&session_id, window.label())
+        .await;
     Ok(Ok(true).into())
 }
 
@@ -63,8 +103,14 @@ pub async fn mijia_cancel_login(
     Ok(Ok(service.cancel_login(&id).await).into())
 }
 #[tauri::command]
-pub async fn mijia_logout(service: tauri::State<'_, MiCloud>) -> Result<ApiResult<bool>, ()> {
-    Ok(service.logout().await.into())
+pub async fn mijia_logout(
+    service: tauri::State<'_, MiCloud>,
+    app: tauri::AppHandle,
+    windows: tauri::State<'_, crate::camera_windows::CameraWindows>,
+) -> Result<ApiResult<bool>, ()> {
+    let result = service.logout().await;
+    windows.close_all(&app).await;
+    Ok(result.into())
 }
 #[tauri::command]
 pub async fn mijia_sync(service: tauri::State<'_, MiCloud>) -> Result<ApiResult<MiSnapshot>, ()> {

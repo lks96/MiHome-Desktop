@@ -3,7 +3,8 @@
   "identifier": "default",
   "description": "Core window capability; application commands validate input in Rust.",
   "windows": [
-    "main"
+    "main",
+    "camera-*"
   ],
   "permissions": [
     "core:default"

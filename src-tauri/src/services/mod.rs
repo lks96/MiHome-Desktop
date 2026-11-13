@@ -10,6 +10,7 @@ pub mod camera_stream;
 pub mod cs2;
 pub mod diagnostics;
 pub mod media_output;
+pub mod media_timing;
 pub mod mijia;
 pub mod mijia_camera;
 pub mod miss;

@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { isTauri } from '@tauri-apps/api/core'
 import { NAlert, NButton, NCheckbox, NDrawer, NDrawerContent, NEmpty, NInput, NInputNumber, NSelect, NSpin, NTag } from 'naive-ui'
 import { useMijiaStore } from '../stores/mijia'
 import CameraConnectionProbe from '../components/CameraConnectionProbe.vue'
 import RemoteCameraPlayer from '../components/RemoteCameraPlayer.vue'
 import { regions, type MiProperty } from '../types/mijia'
+import { call } from '../utils/ipc'
 defineProps<{ camerasOnly?: boolean }>()
 const emit = defineEmits<{ advanced: [] }>()
 const store = useMijiaStore()
@@ -17,6 +18,16 @@ const room = ref<string | null>(null)
 const selected = ref<string | null>(null)
 const clock = ref(Date.now())
 const drafts = ref<Record<string, number | null>>({})
+const opening=ref<string|null>(null)
+const openError=ref('')
+async function play(did:string) {
+  if(opening.value)return
+  opening.value=did;openError.value='';selected.value=null
+  await nextTick()
+  const result=await call<boolean>('camera_open_player',{did})
+  if(!result.ok)openError.value=result.error.message
+  opening.value=null
+}
 const remaining = computed(() => Math.max(0, Math.ceil((store.deadline - clock.value) / 1000)))
 const roomKey = (home: string, roomName: string) => `${home} / ${roomName}`
 const roomOptions = computed(() => [...new Set(store.snapshot.devices.map(d => roomKey(d.home, d.room)))].sort().map(value => ({ label: value, value })))
@@ -39,6 +50,7 @@ onUnmounted(() => { clearInterval(clockTimer); clearInterval(syncTimer); void st
 <template>
   <div class="page-heading"><div><div class="eyebrow">YOUR XIAOMI HOME</div><h1>{{ camerasOnly ? '米家摄像头' : '我的米家' }}</h1><p>打开米家 App 扫一扫，连接你的家。</p></div><div v-if="store.snapshot.loggedIn" class="mi-actions"><NButton :loading="store.syncing" @click="store.sync">刷新设备</NButton><NButton :disabled="store.controlling || store.syncing" @click="store.logout">退出账号</NButton></div></div>
   <NAlert v-if="!native" type="info" class="mi-alert">请在 Windows 桌面客户端中扫码登录。浏览器预览无法连接米家账号或保存会话。</NAlert>
+  <NAlert v-if="openError" type="warning" class="mi-alert">{{ openError }}</NAlert>
   <NAlert v-if="store.error" type="error" class="mi-alert" role="alert">{{ store.error.message }}<NButton v-if="!store.ready && native" size="small" @click="store.initialize(true)">重试读取登录状态</NButton></NAlert>
   <NSpin :show="store.loading">
     <section v-if="!store.snapshot.loggedIn" class="panel mi-welcome">
@@ -55,7 +67,7 @@ onUnmounted(() => { clearInterval(clockTimer); clearInterval(syncTimer); void st
       <NAlert v-for="warning in store.snapshot.warnings" :key="warning" type="warning" class="mi-alert">{{ warning }}</NAlert>
       <div class="mi-filters"><NInput v-model:value="search" placeholder="搜索设备、型号或房间" aria-label="搜索米家设备" clearable /><NSelect v-model:value="room" :options="roomOptions" placeholder="全部房间" clearable aria-label="筛选米家房间" /></div>
       <NEmpty v-if="!filtered.filter(d => !camerasOnly || d.camera).length" style="padding:50px" :description="store.syncing ? '正在同步设备…' : store.snapshot.devices.length ? '没有匹配的设备' : '此地区暂无设备，请确认与米家 App 中的地区一致'" />
-      <div class="mi-device-grid"><article v-for="d in filtered.filter(d => !camerasOnly || d.camera)" :key="d.did" class="panel mi-device" :data-mi-device="d.did"><div class="mi-device-top"><span class="mi-device-icon">{{ d.camera ? '◉' : '⌂' }}</span><NTag :type="d.online ? 'success' : 'default'" size="small" :bordered="false">{{ d.online ? '在线' : '离线' }}</NTag></div><h3>{{ d.name }}</h3><p>{{ d.home }} {{ d.room }}</p><small>{{ d.model }}</small><p v-if="d.camera" class="mi-compatibility">{{ d.model === 'chuangmi.camera.039a01' ? '支持远程播放测试' : '已识别摄像头 · 此型号直播待适配' }}</p><NButton secondary :disabled="!d.online" @click="selected = d.did">{{ d.online ? '查看状态与控制' : '设备离线' }}</NButton></article></div>
+      <div class="mi-device-grid"><article v-for="d in filtered.filter(d => !camerasOnly || d.camera)" :key="d.did" class="panel mi-device" :data-mi-device="d.did"><div class="mi-device-top"><span class="mi-device-icon">{{ d.camera ? '◉' : '⌂' }}</span><NTag :type="d.online ? 'success' : 'default'" size="small" :bordered="false">{{ d.online ? '在线' : '离线' }}</NTag></div><h3>{{ d.name }}</h3><p>{{ d.home }} {{ d.room }}</p><small>{{ d.model }}</small><p v-if="d.camera" class="mi-compatibility">{{ d.model === 'chuangmi.camera.039a01' ? '支持远程播放测试' : '已识别摄像头 · 此型号直播待适配' }}</p><div class="mi-device-actions"><NButton secondary :disabled="!d.online" @click="selected = d.did">{{ d.online ? '查看状态与控制' : '设备离线' }}</NButton><NButton v-if="d.model === 'chuangmi.camera.039a01'" type="primary" :loading="opening === d.did" :disabled="!native || !d.online || opening !== null" @click="play(d.did)">播放</NButton></div></article></div>
     </template>
   </NSpin>
   <div class="mi-advanced"><span>已有 Home Assistant 或视频网关？</span><NButton text @click="emit('advanced')">打开高级接入设置 →</NButton></div>
@@ -65,3 +77,4 @@ onUnmounted(() => { clearInterval(clockTimer); clearInterval(syncTimer); void st
 <style scoped>
 .mi-alert{margin:16px 0}.mi-actions{display:flex;gap:10px}.mi-welcome{display:grid;grid-template-columns:1.2fr 1fr;gap:48px;padding:40px;max-width:1050px}.mi-mark{width:50px;height:50px;border-radius:16px;background:#ff6900;color:white;display:grid;place-items:center;font-size:26px;margin-bottom:24px}.mi-intro h2{font-size:26px;letter-spacing:-1px}.mi-intro p,.mi-intro li{color:#758197;line-height:1.9;font-size:14px}.mi-intro ol{padding-left:20px;margin:24px 0}.mi-intro small,.mi-footnote{font-size:12px;color:#8792a5;line-height:1.8}.mi-login{display:flex;flex-direction:column;gap:15px;max-width:360px;width:100%;justify-self:center}.mi-login label{font-size:13px}.mi-qr,.mi-qr-placeholder{border:1px solid #8792a533;border-radius:18px;min-height:310px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;gap:12px}.mi-qr img{width:210px;height:210px;max-width:100%;background:white}.mi-qr span{font-size:12px;color:#8792a5}.mi-qr-placeholder>span{font-size:80px;line-height:1;color:#8792a5}.mi-qr-placeholder p{font-size:13px;color:#8792a5}.mi-account{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}.mi-account p,.mi-account small{color:#8792a5;font-size:12px}.mi-filters{display:grid;grid-template-columns:2fr 1fr;gap:16px;max-width:700px;margin:20px 0}.mi-device-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:18px}.mi-device-top{display:flex;justify-content:space-between;align-items:center}.mi-device-icon{font-size:30px;color:#ff6900}.mi-device h3{margin-bottom:6px}.mi-device p{font-size:13px;color:#8792a5}.mi-device small{font-size:11px;color:#8792a5;display:block;margin-bottom:16px;overflow-wrap:anywhere}.mi-device .n-button{margin-top:10px}.mi-compatibility{line-height:1.7}.mi-advanced{display:flex;gap:12px;align-items:center;margin:28px 0;font-size:12px;color:#8792a5}.mi-property{padding:20px 0;border-bottom:1px solid #8792a533}.mi-property strong{font-size:14px}.mi-property p{font-size:13px;color:#8792a5}.mi-numeric{display:flex;gap:12px}.mi-numeric>.n-select,.mi-numeric>.n-input-number{flex:1}@media(max-width:1150px){.mi-welcome{gap:24px;padding:24px}.mi-intro h2{font-size:22px}}
 </style>
+<style scoped>.mi-device-actions{display:flex;align-items:center;justify-content:space-between;gap:10px}</style>

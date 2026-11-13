@@ -1,5 +1,7 @@
 # Windows 测试包构建
 
+> 0.3.2：59 项 Rust 测试、29 项浏览器测试通过（另 1 项既有 WebRTC 测试跳过）。新增 MPEG-TS 时间戳输入与独立观看/置顶小窗，Windows 目标检查通过。用户已确认 0.3.1 能跨网出画，新版流畅度与窗口行为待实测。
+
 > 0.3.1 修正用户首轮跨网测试中暴露的连接确认处理缺陷，增强认证响应兼容与分层诊断；55 项 Rust、13 项米家界面测试通过。实际摄像头出画仍需修正版复测。
 
 > 0.3.0 CS2 远程测试实现：53 项 Rust 测试通过；米家界面 12 项通过，包含实际生成 HLS 的浏览器解码。Windows MSVC 目标检查通过。真实摄像头跨网与 Windows 出画仍待实测。
@@ -60,7 +62,7 @@ Tauri CLI 在 Linux 主机上即使打包 Windows 目标也会检测 AppIndicato
 
 ## 0.3.0 的视频组件
 
-云机构建入口会先运行 `python3 scripts/prepare-windows-media.py`。它校验 FFmpeg 8.1.3 官方源码的固定 SHA-256，交叉编译一个只支持本地 H.264/H.265 输入、Media Foundation H.264 编码和 HLS 的 LGPL 共享库构建；不会使用下载的闭源 SDK或现成大型 FFmpeg 二进制。
+云机构建入口会先运行 `python3 scripts/prepare-windows-media.py`。它校验 FFmpeg 8.1.3 官方源码的固定 SHA-256，交叉编译一个只支持本地 H.264/H.265/MPEG-TS 输入、Media Foundation H.264 编码和 HLS 的 LGPL 共享库构建；不会使用下载的闭源 SDK或现成大型 FFmpeg 二进制。
 
 Linux 构建依赖：`gcc-mingw-w64-x86-64-posix`、`nasm`、`make`、Python 3。可通过系统包管理器安装。此云机将签名 Debian 包解包在 `/workspace/.toolchains/ffmpeg-cross`，未修改系统目录。其他安装位置用 `FFMPEG_CROSS_ROOT` 指定（包含 `usr/bin` 的工具链根），或让工具在 PATH 中可用。
 

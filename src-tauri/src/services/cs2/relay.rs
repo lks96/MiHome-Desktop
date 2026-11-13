@@ -200,6 +200,7 @@ async fn handshake(
 pub struct Message {
     pub channel: u8,
     pub bytes: Zeroizing<Vec<u8>>,
+    pub received_at: std::time::Instant,
 }
 /// Counts only. Never include packet bytes, addresses, UID or relay tokens.
 #[derive(Clone, Default, serde::Serialize)]
@@ -363,7 +364,7 @@ async fn transport(
                         let batch=rx.push(seq,&body[4..]).map_err(|e|{diagnostics.lock().unwrap().stream_error_channel=Some(channel);e})?;
                         for bytes in batch {
                             {let mut d=diagnostics.lock().unwrap();if channel==0 {d.command_messages=d.command_messages.saturating_add(1);}else {d.media_messages=d.media_messages.saturating_add(1);}}
-                            messages.try_send(Message {channel,bytes:Zeroizing::new(bytes)}).map_err(|_|failure("CS2_BACKPRESSURE","视频处理速度不足，请停止后重试"))?;
+                            messages.try_send(Message {channel,bytes:Zeroizing::new(bytes),received_at:std::time::Instant::now()}).map_err(|_|failure("CS2_BACKPRESSURE","视频处理速度不足，请停止后重试"))?;
                         }
                     }
                     ACK if body.len()>=4 && body[..2]==[0xd1,0] => {

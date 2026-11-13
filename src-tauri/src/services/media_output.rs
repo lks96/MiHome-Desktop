@@ -1,5 +1,6 @@
 //! Session-local FFmpeg pipeline and authenticated loopback HLS output.
 use super::cs2::failure;
+use super::media_timing::{FrameClock, TimingDiagnostics, TransportMuxer};
 use crate::errors::AppError;
 use std::{
     path::{Path, PathBuf},
@@ -36,6 +37,9 @@ pub struct MediaOutput {
     server: JoinHandle<()>,
     directory: TempDir,
     pub url: String,
+    clock: FrameClock,
+    muxer: TransportMuxer,
+    arrival_origin: Option<std::time::Instant>,
 }
 impl Drop for MediaOutput {
     fn drop(&mut self) {
@@ -67,15 +71,13 @@ impl MediaOutput {
             "-nostats",
             "-nostdin",
             "-fflags",
-            "+genpts",
-            "-r",
-            "20",
+            "+genpts+discardcorrupt",
             "-probesize",
             "262144",
             "-analyzeduration",
-            "1000000",
+            "500000",
             "-f",
-            if codec == 4 { "h264" } else { "hevc" },
+            "mpegts",
             "-i",
             "pipe:0",
             "-an",
@@ -92,7 +94,13 @@ impl MediaOutput {
                 "-b:v",
                 "2500k",
                 "-g",
-                "30",
+                "10",
+                "-bf",
+                "0",
+                "-flags",
+                "+low_delay",
+                "-scenario",
+                "live_streaming",
                 "-pix_fmt",
                 "yuv420p",
             ]);
@@ -107,18 +115,28 @@ impl MediaOutput {
                 "-b:v",
                 "2500k",
                 "-g",
-                "30",
+                "10",
+                "-bf",
+                "0",
                 "-pix_fmt",
                 "yuv420p",
             ]);
         }
         cmd.args([
+            "-fps_mode",
+            "passthrough",
+            "-muxdelay",
+            "0",
+            "-muxpreload",
+            "0",
+            "-flush_packets",
+            "1",
             "-f",
             "hls",
             "-hls_time",
             "1",
             "-hls_list_size",
-            "5",
+            "6",
             "-hls_flags",
             "delete_segments+independent_segments+temp_file",
             "-hls_segment_filename",
@@ -152,9 +170,18 @@ impl MediaOutput {
             server,
             directory,
             url,
+            clock: FrameClock::default(),
+            muxer: TransportMuxer::new(codec),
+            arrival_origin: None,
         })
     }
-    pub async fn write(&mut self, bytes: &[u8]) -> Result<(), AppError> {
+    pub async fn write_frame(
+        &mut self,
+        bytes: &[u8],
+        source_ms: u64,
+        keyframe: bool,
+        received_at: std::time::Instant,
+    ) -> Result<(), AppError> {
         if self
             .child
             .try_wait()
@@ -170,10 +197,26 @@ impl MediaOutput {
             .input
             .as_mut()
             .ok_or_else(|| failure("VIDEO_ENGINE_FAILED", "视频输入已关闭"))?;
-        tokio::time::timeout(Duration::from_secs(3), input.write_all(bytes))
+        let origin = *self.arrival_origin.get_or_insert(received_at);
+        let pts = self.clock.timestamp(
+            source_ms,
+            received_at.saturating_duration_since(origin).as_millis() as u64,
+        );
+        let framed = zeroize::Zeroizing::new(self.muxer.access_unit(bytes, pts, keyframe));
+        let start = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(3), input.write_all(&framed))
             .await
             .map_err(|_| failure("VIDEO_ENGINE_TIMEOUT", "视频处理超时，请重试"))?
-            .map_err(|_| failure("VIDEO_DECODE_FAILED", "无法处理摄像头视频编码"))
+            .map_err(|_| failure("VIDEO_DECODE_FAILED", "无法处理摄像头视频编码"));
+        self.clock.diagnostics.encoder_write_max_ms = self
+            .clock
+            .diagnostics
+            .encoder_write_max_ms
+            .max(start.elapsed().as_millis() as u64);
+        result
+    }
+    pub fn diagnostics(&self) -> TimingDiagnostics {
+        self.clock.diagnostics.clone()
     }
     pub async fn ready(&self) -> bool {
         let Ok(data) = tokio::fs::read(self.directory.path().join("index.m3u8")).await else {
@@ -328,29 +371,38 @@ mod tests {
     #[tokio::test]
     async fn generated_h264_and_hevc_produce_decodable_hls_only_for_the_session_origin() {
         for (codec, encoder, format) in [(4, "libx264", "h264"), (5, "libx265", "hevc")] {
-            let sample = Command::new(engine_path())
-                .args([
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "testsrc2=size=160x96:rate=20",
-                    "-t",
-                    "4",
-                    "-c:v",
-                    encoder,
-                    "-threads",
-                    "1",
-                    "-preset",
-                    "ultrafast",
-                    "-g",
-                    "20",
-                    "-f",
-                    format,
-                    "pipe:1",
-                ])
+            let mut generator = Command::new(engine_path());
+            generator.args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x96:rate=20",
+                "-t",
+                "2",
+                "-c:v",
+                encoder,
+                "-threads",
+                "1",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "10",
+                "-bf",
+                "0",
+            ]);
+            if codec == 4 {
+                generator.args(["-x264-params", "aud=1:repeat-headers=1"]);
+            } else {
+                generator.args([
+                    "-x265-params",
+                    "aud=1:repeat-headers=1:pools=none:frame-threads=1:bframes=0",
+                ]);
+            }
+            let sample = generator
+                .args(["-f", format, "pipe:1"])
                 .stderr(Stdio::null())
                 .output()
                 .await
@@ -358,7 +410,45 @@ mod tests {
             assert!(sample.status.success());
             assert!(!sample.stdout.is_empty());
             let mut out = MediaOutput::start(codec).await.unwrap();
-            out.write(&sample.stdout).await.unwrap();
+            let bytes = &sample.stdout;
+            let mut starts = Vec::new();
+            let mut pos = 0;
+            while pos + 4 < bytes.len() {
+                let n = if bytes[pos..].starts_with(&[0, 0, 0, 1]) {
+                    4
+                } else if bytes[pos..].starts_with(&[0, 0, 1]) {
+                    3
+                } else {
+                    pos += 1;
+                    continue;
+                };
+                let kind = if codec == 4 {
+                    bytes[pos + n] & 31
+                } else {
+                    (bytes[pos + n] >> 1) & 63
+                };
+                if kind == if codec == 4 { 9 } else { 35 } {
+                    starts.push(pos);
+                }
+                pos += n;
+            }
+            assert_eq!(starts.len(), 40);
+            for (index, &start) in starts.iter().enumerate() {
+                let end = starts.get(index + 1).copied().unwrap_or(bytes.len());
+                out.write_frame(
+                    &bytes[start..end],
+                    10000 + index as u64 * 100,
+                    index % 10 == 0,
+                    std::time::Instant::now(),
+                )
+                .await
+                .unwrap();
+            }
+            out.input.take();
+            tokio::time::timeout(Duration::from_secs(10), out.child.wait())
+                .await
+                .unwrap()
+                .unwrap();
             tokio::time::timeout(Duration::from_secs(10), async {
                 while !out.ready().await {
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -375,6 +465,48 @@ mod tests {
                 .unwrap();
             assert_eq!(playlist.status(), 200);
             let content = playlist.text().await.unwrap();
+            // The SPS advertises 20fps, but actual capture PTS is 10fps. Check
+            // every output PTS rather than EXTINF at EOF: FFmpeg uses the SPS
+            // duration to estimate the final unfinished HLS segment.
+            let probe = Command::new("/usr/bin/ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_packets",
+                    "-show_entries",
+                    "packet=pts_time",
+                    "-of",
+                    "json",
+                ])
+                .arg(out.directory.path().join("index.m3u8"))
+                .output()
+                .await
+                .unwrap();
+            assert!(probe.status.success());
+            let timeline: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
+            let timestamps = timeline["packets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["pts_time"].as_str().unwrap().parse::<f64>().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                timestamps.len(),
+                40,
+                "codec {codec} lost or duplicated frames"
+            );
+            assert!(
+                (timestamps[39] - timestamps[0] - 3.9).abs() < 0.02,
+                "codec {codec} compressed playback time"
+            );
+            assert!(
+                timestamps
+                    .windows(2)
+                    .all(|p| (p[1] - p[0] - 0.1).abs() < 0.02),
+                "codec {codec} has discontinuous PTS"
+            );
             let segment = content
                 .lines()
                 .find(|l| l.starts_with("seg") && l.ends_with(".ts"))

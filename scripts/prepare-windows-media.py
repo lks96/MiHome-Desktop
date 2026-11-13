@@ -26,7 +26,7 @@ FLAGS = [
     "--disable-debug", "--disable-ffplay", "--disable-ffprobe", "--disable-avdevice",
     "--disable-swresample", "--disable-pthreads", "--enable-w32threads",
     "--enable-shared", "--disable-static", "--enable-small", "--enable-ffmpeg",
-    "--enable-protocol=file,pipe", "--enable-demuxer=h264,hevc", "--enable-parser=h264,hevc",
+    "--enable-protocol=file,pipe", "--enable-demuxer=h264,hevc,mpegts", "--enable-parser=h264,hevc",
     "--enable-decoder=h264,hevc", "--enable-mediafoundation", "--enable-d3d11va",
     "--enable-encoder=h264_mf", "--enable-muxer=hls,mpegts",
     "--enable-filter=buffer,buffersink,format,scale,null,fps",

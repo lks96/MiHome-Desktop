@@ -29,9 +29,12 @@ pub struct StreamStatus {
     pub error: Option<AppError>,
     pub auth_diagnostics: miss::AuthDiagnostics,
     pub transport_diagnostics: Option<relay::TransportDiagnostics>,
+    pub timing_diagnostics: Option<super::media_timing::TimingDiagnostics>,
+    pub requested_quality: u8,
 }
 struct Entry {
     did: String,
+    owner: String,
     status: Arc<Mutex<StreamStatus>>,
     born: Instant,
     lease: Arc<Mutex<Instant>>,
@@ -47,6 +50,21 @@ impl CameraStreams {
     where
         F: Future<Output = Result<RemoteGrant, AppError>> + Send + 'static,
     {
+        self.launch_owned(did, "main", 2, provision).await
+    }
+    pub async fn launch_owned<F>(
+        &self,
+        did: &str,
+        owner: &str,
+        quality: u8,
+        provision: F,
+    ) -> Result<StreamStatus, AppError>
+    where
+        F: Future<Output = Result<RemoteGrant, AppError>> + Send + 'static,
+    {
+        if quality > 2 {
+            return Err(AppError::invalid_input("请选择自动、流畅或高清画质"));
+        }
         let mut entries = self.entries.lock().await;
         // Reap finished tasks before deciding the resource budget.
         entries.retain(|_, e| !e.task.is_finished());
@@ -73,6 +91,8 @@ impl CameraStreams {
             error: None,
             auth_diagnostics: miss::AuthDiagnostics::default(),
             transport_diagnostics: None,
+            timing_diagnostics: None,
+            requested_quality: quality,
         };
         let status = Arc::new(Mutex::new(initial.clone()));
         let state = status.clone();
@@ -85,7 +105,7 @@ impl CameraStreams {
             let mut output = None;
             let mut stop_message = None;
             let outcome = tokio::select! {
-                result=run(provision,&state,&mut link,&mut output,&mut stop_message)=>result,
+                result=run(provision,&state,&mut link,&mut output,&mut stop_message,quality)=>result,
                 _=cancelled.changed()=>Ok(()),
                 _=async {loop {tokio::time::sleep(Duration::from_secs(5)).await;if heartbeat.lock().unwrap().elapsed()>Duration::from_secs(40){break;}}}=>Err(failure("CAMERA_LEASE_EXPIRED","播放页面已关闭，视频会话已释放")),
             };
@@ -117,6 +137,7 @@ impl CameraStreams {
             id,
             Entry {
                 did: did.into(),
+                owner: owner.into(),
                 status,
                 born,
                 lease,
@@ -127,9 +148,13 @@ impl CameraStreams {
         Ok(initial)
     }
     pub async fn status(&self, id: &str) -> Result<StreamStatus, AppError> {
+        self.status_owned(id, "main").await
+    }
+    pub async fn status_owned(&self, id: &str, owner: &str) -> Result<StreamStatus, AppError> {
         let entries = self.entries.lock().await;
         let entry = entries
             .get(id)
+            .filter(|e| e.owner == owner)
             .ok_or_else(|| failure("CAMERA_SESSION_GONE", "视频会话已结束，请重新连接"))?;
         *entry.lease.lock().unwrap() = Instant::now();
         let mut status = entry.status.lock().unwrap().clone();
@@ -147,6 +172,52 @@ impl CameraStreams {
                 entry.task.abort();
                 let _ = entry.task.await;
             }
+        }
+    }
+    pub async fn stop_owned(&self, id: &str, owner: &str) {
+        let entry = {
+            let mut entries = self.entries.lock().await;
+            if entries.get(id).is_some_and(|e| e.owner == owner) {
+                entries.remove(id)
+            } else {
+                None
+            }
+        };
+        if let Some(mut entry) = entry {
+            let _ = entry.cancel.send(true);
+            if tokio::time::timeout(Duration::from_secs(5), &mut entry.task)
+                .await
+                .is_err()
+            {
+                entry.task.abort();
+                let _ = entry.task.await;
+            }
+        }
+    }
+    pub async fn stop_owner(&self, owner: &str) {
+        let ids = self
+            .entries
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, e)| e.owner == owner)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.stop_owned(&id, owner).await;
+        }
+    }
+    pub async fn stop_device(&self, did: &str) {
+        let ids = self
+            .entries
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, e)| e.did == did)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.stop(&id).await;
         }
     }
     pub async fn stop_all(&self) {
@@ -172,6 +243,7 @@ async fn run<F>(
     connection: &mut Option<relay::Connection>,
     pipeline: &mut Option<MediaOutput>,
     stop_message: &mut Option<zeroize::Zeroizing<Vec<u8>>>,
+    quality: u8,
 ) -> Result<(), AppError>
 where
     F: Future<Output = Result<RemoteGrant, AppError>>,
@@ -215,7 +287,7 @@ where
     conn.command(&miss::encrypted_command(
         &grant.key,
         0x102,
-        br#"{"videoquality":2,"enableaudio":0}"#,
+        format!("{{\"videoquality\":{quality},\"enableaudio\":0}}").as_bytes(),
     ))
     .await?;
     status.lock().unwrap().stage = "waiting_media";
@@ -277,10 +349,27 @@ where
         }
         let output = pipeline.as_mut().unwrap();
         if !headers.is_empty() {
-            output.write(&headers).await?;
+            headers.extend(&*video.bytes);
+            output
+                .write_frame(
+                    &headers,
+                    video.timestamp,
+                    video.keyframe,
+                    message.received_at,
+                )
+                .await?;
             headers.clear();
+        } else {
+            output
+                .write_frame(
+                    &video.bytes,
+                    video.timestamp,
+                    video.keyframe,
+                    message.received_at,
+                )
+                .await?;
         }
-        output.write(&video.bytes).await?;
+        status.lock().unwrap().timing_diagnostics = Some(output.diagnostics());
         if !ready && output.ready().await {
             ready = true;
             let mut s = status.lock().unwrap();
@@ -299,6 +388,59 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn window_ownership_keeps_floating_playback_independent_and_scopes_stop() {
+        let sessions = CameraStreams::default();
+        let main = sessions
+            .launch_owned("a", "main", 2, std::future::pending())
+            .await
+            .unwrap();
+        let viewer = sessions
+            .launch_owned("b", "camera-test", 1, std::future::pending())
+            .await
+            .unwrap();
+        assert!(
+            sessions
+                .status_owned(&viewer.session_id, "main")
+                .await
+                .is_err()
+        );
+        sessions.stop_owned(&viewer.session_id, "main").await;
+        assert!(
+            sessions
+                .status_owned(&viewer.session_id, "camera-test")
+                .await
+                .is_ok()
+        );
+        sessions.stop_owner("main").await;
+        assert!(
+            sessions
+                .status_owned(&main.session_id, "main")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            sessions
+                .status_owned(&viewer.session_id, "camera-test")
+                .await
+                .unwrap()
+                .requested_quality,
+            1
+        );
+        sessions.stop_owner("camera-test").await;
+        assert!(
+            sessions
+                .status_owned(&viewer.session_id, "camera-test")
+                .await
+                .is_err()
+        );
+        assert!(
+            sessions
+                .launch_owned("c", "main", 255, std::future::pending())
+                .await
+                .is_err()
+        );
+    }
     #[tokio::test]
     async fn stop_cancels_provisioning_idempotently_and_keeps_sessions_private() {
         let sessions = CameraStreams::default();

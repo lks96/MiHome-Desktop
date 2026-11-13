@@ -12,7 +12,7 @@ async function mijiaFixture(page: Page, rememberFailure = false, expiresIn = 180
     const subscriptions: Record<string, number> = {}
     w.__mijiaEmit = (event: string, payload: unknown) => callbacks[subscriptions[event]!]?.({ event, payload })
     let sequence = 0
-    const state = { authorized: false, canceled: [] as string[], writes: [] as unknown[], restoreCalls: 0, remoteDelay: false, remoteStartFinish: null as null | ((value: unknown) => void), remoteStarts: [] as string[], remoteStops: [] as string[], remote: { sessionId:'test-session',stage:'relay_request',failedStage:null,elapsedMs:1000,attempt:1,mediaPackets:0,keyframes:0,codec:null,playbackUrl:null,error:null }, cameraProbes: [] as string[], cameraProbeFinish: null as null | ((value: unknown) => void), finish: null as null | ((value: unknown) => void) }
+    const state = { authorized: false, canceled: [] as string[], writes: [] as unknown[], restoreCalls: 0, remoteDelay: false, remoteStartFinish: null as null | ((value: unknown) => void), playerOpens: [] as string[], miniChanges: [] as boolean[], fullscreenChanges: [] as boolean[], remoteQualities: [] as number[], remoteStarts: [] as string[], remoteStops: [] as string[], remote: { sessionId:'test-session',stage:'relay_request',failedStage:null,elapsedMs:1000,attempt:1,mediaPackets:0,keyframes:0,codec:null,playbackUrl:null,error:null }, cameraProbes: [] as string[], cameraProbeFinish: null as null | ((value: unknown) => void), finish: null as null | ((value: unknown) => void) }
     w.__mijiaTest = state
     const snapshot = () => ({ loggedIn: state.authorized, region: 'cn', accountLabel: state.authorized ? '小米账号 · 尾号 5678' : null, devices: state.authorized ? [
       { did: 'light-1', name: '书房灯', model: 'fixture.light.one', home: '我的家', room: '书房', online: true, camera: false },
@@ -38,7 +38,11 @@ async function mijiaFixture(page: Page, rememberFailure = false, expiresIn = 180
         if (command === 'mijia_sync') return { ok: true, data: snapshot() }
         if (command === 'mijia_logout') { state.authorized = false; return { ok: true, data: true } }
         if (command === 'mijia_camera_probe') { state.cameraProbes.push(args.did); return new Promise(resolve => { state.cameraProbeFinish = resolve }) }
-        if (command === 'camera_remote_start') { state.remoteStarts.push(args.did); if (state.remoteDelay) return new Promise(resolve => { state.remoteStartFinish = resolve }); return {ok:true,data:{...state.remote}} }
+        if (command === 'camera_open_player') { state.playerOpens.push(args.did); return {ok:true,data:true} }
+        if (command === 'camera_player_context') return {ok:true,data:{did:'camera-1',name:'门口摄像头',model:'chuangmi.camera.039a01',home:'我的家',room:'门口',online:true,camera:true}}
+        if (command === 'camera_player_fullscreen') {state.fullscreenChanges.push(args.enabled);return {ok:true,data:args.enabled}}
+        if (command === 'camera_player_mode') { state.miniChanges.push(args.mini);return {ok:true,data:args.mini} }
+        if (command === 'camera_remote_start') { state.remoteQualities.push(args.quality); state.remoteStarts.push(args.did); if (state.remoteDelay) return new Promise(resolve => { state.remoteStartFinish = resolve }); return {ok:true,data:{...state.remote}} }
         if (command === 'camera_remote_status') return {ok:true,data:{...state.remote}}
         if (command === 'camera_remote_stop') { state.remoteStops.push(args.sessionId);return {ok:true,data:true} }
         if (command === 'mijia_get_properties') return { ok: true, data: properties }
@@ -213,6 +217,21 @@ test('remote HLS uses real decoded frames before reporting playback and stops on
     await page.getByRole('button',{name:'停止播放',exact:true}).click()
     await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteStops)).toEqual(['test-session'])
     await expect(page.getByText('正在播放',{exact:true})).toHaveCount(0)
+    await page.goto('/?cameraPlayer=1')
+    await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteStarts)).toEqual(['camera-1'])
+    await page.evaluate(() => {const s=(window as any).__mijiaTest;s.remote={...s.remote,stage:'media_ready',mediaPackets:100,codec:'H.264',playbackUrl:'http://127.0.0.1:18888/fixture/index.m3u8'}})
+    await expect(page.getByText('正在播放',{exact:true})).toBeVisible({timeout:15000})
+    await page.getByRole('button',{name:'全屏',exact:true}).click()
+    await expect(page.getByRole('button',{name:'退出全屏',exact:true})).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('button',{name:'全屏',exact:true})).toBeVisible()
+    expect(await page.evaluate(() => (window as any).__mijiaTest.fullscreenChanges)).toEqual([true,false])
+    await page.getByRole('button',{name:'小窗模式',exact:true}).click()
+    await page.setViewportSize({width:480,height:340})
+    await expect.poll(() => page.locator('video').evaluate((v:HTMLVideoElement)=>v.videoWidth)).toBe(320)
+    await page.screenshot({path:'/workspace/.environment/camera-floating-video.png'})
+    expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStarts)).toEqual(['camera-1'])
+    expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStops)).toEqual([])
   } finally { rmSync(folder,{recursive:true,force:true}) }
 })
 
@@ -260,11 +279,42 @@ test('auth diagnostics expose only structure and deterministic parse failures do
   await expect(page.getByText('摄像头认证响应格式暂不兼容，请复制连接结果',{exact:true})).toBeVisible()
   await page.getByText('连接结果',{exact:true}).click()
   const report=page.locator('[data-remote-camera-result]')
-  await expect(report).toContainText('"diagnosticSchema": 3')
-  await expect(report).toContainText('"clientVersion": "0.3.1"')
+  await expect(report).toContainText('"diagnosticSchema": 4')
+  await expect(report).toContainText('"clientVersion": "0.3.2"')
   await expect(report).toContainText('"commandByteOrder": "le"')
   await expect(report).toContainText('"linkNonRequests": 1')
   await expect(report).not.toContainText('private-')
   await page.clock.runFor(15000)
   expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStarts)).toEqual(['camera-1'])
+})
+
+test('camera card play opens a dedicated viewer without loading the control drawer', async ({ page }) => {
+  await mijiaFixture(page);await page.goto('/');await scan(page)
+  await page.evaluate(() => (window as any).__mijiaTest.finish({ok:true,data:{state:'authorized'}}))
+  await page.locator('[data-mi-device="camera-1"]').getByRole('button',{name:'播放',exact:true}).click()
+  await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.playerOpens)).toEqual(['camera-1'])
+  await expect(page.getByText('远程观看',{exact:true})).toHaveCount(0)
+})
+
+test('standalone viewer autoplays and switches floating size without restarting its session', async ({ page }) => {
+  await mijiaFixture(page);await page.goto('/?cameraPlayer=1')
+  await expect(page.getByRole('heading',{name:'门口摄像头',exact:true})).toBeVisible()
+  await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteStarts)).toEqual(['camera-1'])
+  await page.getByRole('button',{name:'小窗模式',exact:true}).click()
+  await expect(page.getByRole('button',{name:'退出小窗',exact:true})).toBeVisible()
+  await page.setViewportSize({width:480,height:340})
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(480)
+  await page.screenshot({path:'/workspace/.environment/camera-floating-ui.png'})
+  await page.getByRole('button',{name:'退出小窗',exact:true}).click()
+  expect(await page.evaluate(() => (window as any).__mijiaTest.miniChanges)).toEqual([true,false])
+  expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStarts)).toEqual(['camera-1'])
+  expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStops)).toEqual([])
+})
+
+test('quality selection keeps HD as default and restarts once with fluent quality', async ({ page }) => {
+  await mijiaFixture(page);await page.goto('/?cameraPlayer=1')
+  await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteQualities)).toEqual([2])
+  await page.getByRole('combobox',{name:'视频画质'}).selectOption('1')
+  await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteQualities)).toEqual([2,1])
+  expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStops)).toEqual(['test-session'])
 })

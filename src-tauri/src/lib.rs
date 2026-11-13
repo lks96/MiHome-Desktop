@@ -1,4 +1,6 @@
 #[cfg(feature = "desktop")]
+mod camera_windows;
+#[cfg(feature = "desktop")]
 mod commands;
 pub mod database;
 #[cfg(feature = "desktop")]
@@ -65,6 +67,7 @@ pub fn run() {
                 }),
             );
             app.manage(services::cameras::CameraSessions::default());
+            app.manage(camera_windows::CameraWindows::default());
             app.manage(database.clone());
             app.manage(service.clone());
             app.manage(services::mijia::MiCloud::new(Arc::new(
@@ -102,6 +105,10 @@ pub fn run() {
             mijia_commands::camera_remote_start,
             mijia_commands::camera_remote_status,
             mijia_commands::camera_remote_stop,
+            camera_windows::camera_open_player,
+            camera_windows::camera_player_context,
+            camera_windows::camera_player_mode,
+            camera_windows::camera_player_fullscreen,
             mijia_commands::mijia_set_property,
             commands::settings_get,
             commands::settings_update,

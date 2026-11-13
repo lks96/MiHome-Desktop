@@ -154,6 +154,25 @@ pub async fn save_settings(
     }
 }
 pub fn window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
+    if window.label().starts_with("camera-") {
+        if matches!(
+            event,
+            tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+        ) {
+            let app = window.app_handle().clone();
+            let label = window.label().to_owned();
+            tauri::async_runtime::spawn(async move {
+                app.state::<crate::services::mijia::MiCloud>()
+                    .cameras
+                    .stop_owner(&label)
+                    .await;
+                app.state::<crate::camera_windows::CameraWindows>()
+                    .forget(&label)
+                    .await;
+            });
+        }
+        return;
+    }
     if window.label() != "main" {
         return;
     }
@@ -161,7 +180,7 @@ pub fn window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
         if let Some(cloud) = window.try_state::<crate::services::mijia::MiCloud>() {
             let cameras = cloud.cameras.clone();
             tauri::async_runtime::spawn(async move {
-                cameras.stop_all().await;
+                cameras.stop_owner("main").await;
             });
         }
         let Some(state) = window.try_state::<DesktopState>() else {
@@ -176,6 +195,8 @@ pub fn window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
             } else {
                 tracing::warn!("Unable to hide main window");
             }
+        } else {
+            window.app_handle().exit(0);
         }
     }
 }

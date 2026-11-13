@@ -719,7 +719,18 @@ impl MiCloud {
         &self,
         did: &str,
     ) -> Result<super::camera_stream::StreamStatus, AppError> {
+        self.camera_remote_start_owned(did, 2, "main").await
+    }
+    pub async fn camera_remote_start_owned(
+        &self,
+        did: &str,
+        quality: u8,
+        owner: &str,
+    ) -> Result<super::camera_stream::StreamStatus, AppError> {
         use super::mijia_camera;
+        if quality > 2 {
+            return Err(AppError::invalid_input("请选择自动、流畅或高清画质"));
+        }
         let _operation = self.operation.lock().await;
         let auth = self.auth().await?;
         {
@@ -742,7 +753,7 @@ impl MiCloud {
         }
         let cloud = self.clone();
         let device = did.to_owned();
-        self.cameras.launch(did,async move {
+        self.cameras.launch_owned(did,owner,quality,async move {
             let challenge=mijia_camera::Challenge::default();
             let mut data=cloud.request(&auth,"/v2/device/miss_get_vendor",json!({"app_pubkey":challenge.public,"did":device,"support_vendors":"TUTK_CS2_MTP"})).await?;
             let result=mijia_camera::remote_grant(&data,challenge);
