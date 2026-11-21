@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { version as clientVersion } from '../package.json'
+const { version: clientVersion } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 
 // Test-only IPC. Account tokens and real QR authorization never enter these fixtures.
 async function mijiaFixture(page: Page, rememberFailure = false, expiresIn = 180) {
