@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { version as clientVersion } from '../package.json'
 
 // Test-only IPC. Account tokens and real QR authorization never enter these fixtures.
 async function mijiaFixture(page: Page, rememberFailure = false, expiresIn = 180) {
@@ -284,7 +285,7 @@ test('auth diagnostics expose only structure and deterministic parse failures do
   await page.getByText('连接结果',{exact:true}).click()
   const report=page.locator('[data-remote-camera-result]')
   await expect(report).toContainText('"diagnosticSchema": 4')
-  await expect(report).toContainText('"clientVersion": "0.3.2"')
+  await expect(report).toContainText(`"clientVersion": "${clientVersion}"`)
   await expect(report).toContainText('"commandByteOrder": "le"')
   await expect(report).toContainText('"linkNonRequests": 1')
   await expect(report).not.toContainText('private-')
