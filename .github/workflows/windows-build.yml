@@ -49,6 +49,40 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked
       - name: Build Windows executable and NSIS installer
         run: pnpm tauri build --bundles nsis -- --locked
+      - name: Verify Windows installer and application startup
+        shell: pwsh
+        timeout-minutes: 4
+        run: |
+          $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis/*-setup.exe' | Select-Object -First 1
+          $installDir = Join-Path $env:RUNNER_TEMP 'mihome-smoke'
+          $setup = Start-Process -FilePath $installer.FullName -ArgumentList '/S', "/D=$installDir" -PassThru -Wait
+          if ($setup.ExitCode -ne 0) { throw "Installer exited with code $($setup.ExitCode)" }
+          $exe = Join-Path $installDir 'mi-home-desktop.exe'
+          if (!(Test-Path $exe)) { throw 'Installed application executable is missing' }
+          $logDir = Join-Path $env:LOCALAPPDATA 'com.lks96.mihome-desktop/logs'
+          $process = Start-Process -FilePath $exe -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(45)
+            do {
+              Start-Sleep -Seconds 1
+              $process.Refresh()
+              if ($process.HasExited) { throw "Application exited at startup with code $($process.ExitCode)" }
+              $logs = Get-ChildItem $logDir -Filter '*.log' -ErrorAction SilentlyContinue
+              $initialized = $logs | Select-String -SimpleMatch 'Application initialized' -Quiet
+            } until ($initialized -or (Get-Date) -gt $deadline)
+            if (!$initialized) { throw 'Application did not complete startup' }
+            Start-Sleep -Seconds 10
+            $process.Refresh()
+            if ($process.HasExited) { throw "Application exited after initialization with code $($process.ExitCode)" }
+          } catch {
+            Get-ChildItem $logDir -Filter '*.log' -ErrorAction SilentlyContinue | Get-Content -Tail 25
+            Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = (Get-Date).AddMinutes(-3) } -ErrorAction SilentlyContinue |
+              Where-Object { $_.Message -like '*mi-home-desktop.exe*' } |
+              Select-Object -First 5 TimeCreated, Id, Message | Format-List
+            throw
+          } finally {
+            if (!$process.HasExited) { Stop-Process -Id $process.Id }
+          }
       - name: Hash executable and installer
         shell: pwsh
         run: |
@@ -95,5 +129,5 @@ jobs:
           sha256sum MiHome-Desktop-Windows-x64-setup.exe > Windows-Installer-SHA256SUMS.txt
           gh release create "$GITHUB_REF_NAME" \
             --verify-tag --prerelease --title "$GITHUB_REF_NAME Windows x64" \
-            --notes '实验版包含现场声音、麦克风对讲和四向云台。需要 chuangmi.camera.039a01 实机验证。安装包未签名。' \
+            --notes '启动改进版。主窗口在本地服务初始化后创建，启动失败会显示失败阶段。包含现场声音、麦克风对讲和四向云台。安装包未签名。' \
             MiHome-Desktop-Windows-x64-setup.exe Windows-Installer-SHA256SUMS.txt

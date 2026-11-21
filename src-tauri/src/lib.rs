@@ -18,6 +18,7 @@ pub fn run() {
     use services::session::{HaEvent, HaService};
     use std::sync::Arc;
     use tauri::{Emitter, Manager};
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
     tauri::Builder::default()
         .plugin(
             tauri_plugin_autostart::Builder::new()
@@ -36,61 +37,108 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(desktop::window_event)
         .setup(|app| {
-            let guard = logging::init(&app.path().app_log_dir()?)?;
-            app.manage(guard);
-            let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data_dir)?;
-            let database = tauri::async_runtime::block_on(database::Database::open(
-                &data_dir.join("mihome.sqlite"),
-            ))?;
-            let settings = tauri::async_runtime::block_on(database.settings())
-                .map_err(|_| std::io::Error::other("Unable to load application preferences"))?;
-            app.manage(desktop::DesktopState::new(&settings));
-            if desktop::install_tray(app.handle()).is_err() {
-                tracing::warn!("System tray unavailable");
+            let initialize = || -> Result<(), &'static str> {
+                match app
+                    .path()
+                    .app_log_dir()
+                    .ok()
+                    .and_then(|path| logging::init(&path).ok())
+                {
+                    Some(guard) => {
+                        app.manage(guard);
+                    }
+                    None => eprintln!("Unable to initialize application logging"),
+                }
+                let data_dir = app
+                    .path()
+                    .app_data_dir()
+                    .map_err(|_| "无法定位本地数据目录")?;
+                std::fs::create_dir_all(&data_dir).map_err(|_| "无法创建本地数据目录")?;
+                let database = tauri::async_runtime::block_on(database::Database::open(
+                    &data_dir.join("mihome.sqlite"),
+                ))
+                .map_err(|_| "无法打开或升级本地数据库")?;
+                let settings =
+                    tauri::async_runtime::block_on(database.settings()).unwrap_or_else(|error| {
+                        tracing::warn!(
+                            code = error.code,
+                            "Unable to load stored preferences at startup"
+                        );
+                        models::AppSettings {
+                            auto_connect: false,
+                            ..models::AppSettings::default()
+                        }
+                    });
+                app.manage(desktop::DesktopState::new(&settings));
+                let handle = app.handle().clone();
+                let service = HaService::new(
+                    Arc::new(security::SystemCredentials),
+                    Arc::new(move |event| {
+                        let result = match event {
+                            HaEvent::Connection(status) => {
+                                handle.emit("ha:connection_changed", status)
+                            }
+                            HaEvent::Synced(entities) => handle.emit("ha:sync_completed", entities),
+                            HaEvent::Changed(entity) => handle.emit("device:state_changed", entity),
+                            HaEvent::Removed(id) => handle.emit("device:removed", id),
+                            HaEvent::Catalog(catalog) => handle.emit("ha:catalog_changed", catalog),
+                            HaEvent::SyncStarted => handle.emit("ha:sync_started", ()),
+                        };
+                        if result.is_err() {
+                            tracing::warn!("Unable to deliver Home Assistant UI event");
+                        }
+                    }),
+                );
+                app.manage(services::cameras::CameraSessions::default());
+                app.manage(camera_windows::CameraWindows::default());
+                app.manage(database.clone());
+                app.manage(service.clone());
+                app.manage(services::mijia::MiCloud::new(Arc::new(
+                    security::SystemCredentials,
+                )));
+
+                // Create the WebView only after its IPC state is ready.
+                let config = app
+                    .config()
+                    .app
+                    .windows
+                    .iter()
+                    .find(|window| window.label == "main")
+                    .ok_or("找不到主窗口配置")?;
+                tauri::WebviewWindowBuilder::from_config(app.handle(), config)
+                    .and_then(|builder| builder.build())
+                    .map_err(|_| "无法创建主窗口，请检查 Microsoft Edge WebView2 Runtime")?;
+                if desktop::install_tray(app.handle()).is_err() {
+                    tracing::warn!("System tray unavailable");
+                }
+                if settings.auto_connect {
+                    tauri::async_runtime::spawn(async move {
+                        let result = async {
+                            if database.connection().await?.is_some() {
+                                service.connect(&database).await?;
+                            }
+                            Ok::<(), errors::AppError>(())
+                        }
+                        .await;
+                        if let Err(error) = result {
+                            service.report_error(error).await;
+                        }
+                    });
+                }
+                tracing::info!(
+                    version = env!("CARGO_PKG_VERSION"),
+                    "Application initialized"
+                );
+                Ok(())
+            };
+            if let Err(stage) = initialize() {
+                tracing::error!(stage, "Application startup failed");
+                let handle = app.handle().clone();
+                app.dialog()
+                    .message(format!("Mi Home Desktop 启动失败。\n{stage}"))
+                    .kind(MessageDialogKind::Error)
+                    .show(move |_| handle.exit(1));
             }
-            let handle = app.handle().clone();
-            let service = HaService::new(
-                Arc::new(security::SystemCredentials),
-                Arc::new(move |event| {
-                    let result = match event {
-                        HaEvent::Connection(status) => handle.emit("ha:connection_changed", status),
-                        HaEvent::Synced(entities) => handle.emit("ha:sync_completed", entities),
-                        HaEvent::Changed(entity) => handle.emit("device:state_changed", entity),
-                        HaEvent::Removed(id) => handle.emit("device:removed", id),
-                        HaEvent::Catalog(catalog) => handle.emit("ha:catalog_changed", catalog),
-                        HaEvent::SyncStarted => handle.emit("ha:sync_started", ()),
-                    };
-                    if result.is_err() {
-                        tracing::warn!("Unable to deliver Home Assistant UI event");
-                    }
-                }),
-            );
-            app.manage(services::cameras::CameraSessions::default());
-            app.manage(camera_windows::CameraWindows::default());
-            app.manage(database.clone());
-            app.manage(service.clone());
-            app.manage(services::mijia::MiCloud::new(Arc::new(
-                security::SystemCredentials,
-            )));
-            tauri::async_runtime::spawn(async move {
-                let result = async {
-                    if database.settings().await?.auto_connect
-                        && database.connection().await?.is_some()
-                    {
-                        service.connect(&database).await?;
-                    }
-                    Ok::<(), errors::AppError>(())
-                }
-                .await;
-                if let Err(error) = result {
-                    service.report_error(error).await;
-                }
-            });
-            tracing::info!(
-                version = env!("CARGO_PKG_VERSION"),
-                "Application initialized"
-            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

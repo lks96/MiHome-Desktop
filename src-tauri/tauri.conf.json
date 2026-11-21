@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Mi Home Desktop",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "identifier": "com.lks96.mihome-desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "Mi Home Desktop",
+        "create": false,
         "width": 1440,
         "height": 900,
         "minWidth": 1100,
