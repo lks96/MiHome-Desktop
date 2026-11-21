@@ -203,6 +203,59 @@ fn auth_reply(
     Ok(true)
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioPacket {
+    pub codec: u32,
+    pub sample_rate: u32,
+    pub bytes: Vec<u8>,
+}
+
+pub fn audio(key: &[u8; 32], packet: &[u8]) -> Option<AudioPacket> {
+    let field = |offset| {
+        packet
+            .get(offset..offset + 4)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+    };
+    let codec = field(4)?;
+    if !matches!(codec, 1024 | 1026 | 1027 | 1032)
+        || packet.len() > 4136
+        || packet.len().checked_sub(32)? != field(0)? as usize
+    {
+        return None;
+    }
+    let sample_rate = if codec == 1032 {
+        48000
+    } else if (field(12)? >> 3) & 15 != 0 {
+        16000
+    } else {
+        8000
+    };
+    let bytes = decrypt(key, &packet[32..]).ok()?;
+    Some(AudioPacket {
+        codec,
+        sample_rate,
+        bytes: bytes.to_vec(),
+    })
+}
+
+pub fn speaker_packet(key: &[u8; 32], samples: &[u8]) -> Zeroizing<Vec<u8>> {
+    let mut iv = [0; 12];
+    rand::rng().fill_bytes(&mut iv[4..]);
+    let mut packet = Zeroizing::new(vec![0; 32]);
+    packet[..4].copy_from_slice(&((samples.len() + 8) as u32).to_le_bytes());
+    packet[4..8].copy_from_slice(&1027u32.to_le_bytes());
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    packet[16..24].copy_from_slice(&timestamp.to_le_bytes());
+    packet.extend(&iv[4..]);
+    packet.extend(samples);
+    ChaCha20::new(key.into(), (&iv).into()).apply_keystream(&mut packet[40..]);
+    packet
+}
+
 pub struct VideoPacket {
     pub codec: u32,
     pub sequence: u32,
@@ -257,7 +310,7 @@ pub fn video(key: &[u8; 32], packet: &[u8]) -> Result<Option<VideoPacket>, AppEr
     let codec = field(4);
     if !matches!(codec, 4 | 5) {
         return Ok(None);
-    } // video-only milestone
+    }
     let bytes = decrypt(key, &packet[32..])?;
     if !bytes.starts_with(&[0, 0, 0, 1]) && !bytes.starts_with(&[0, 0, 1]) {
         return Err(failure(
@@ -277,6 +330,18 @@ pub fn video(key: &[u8; 32], packet: &[u8]) -> Result<Option<VideoPacket>, AppEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn speaker_frame_preserves_alaw_payload_in_miss_envelope() {
+        let samples = [0xd5; 320];
+        let key = [0x42; 32];
+        let packet = speaker_packet(&key, &samples);
+        let decoded = audio(&key, &packet).unwrap();
+        assert_eq!(decoded.codec, 1027);
+        assert_eq!(decoded.sample_rate, 8000);
+        assert_eq!(decoded.bytes, samples);
+        assert!(audio(&key, &packet[..packet.len() - 1]).is_none());
+    }
+
     #[test]
     fn nacl_box_precompute_matches_published_alice_bob_vector() {
         let a = x25519_dalek::StaticSecret::from(

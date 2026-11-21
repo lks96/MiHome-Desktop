@@ -12,7 +12,7 @@ async function mijiaFixture(page: Page, rememberFailure = false, expiresIn = 180
     const subscriptions: Record<string, number> = {}
     w.__mijiaEmit = (event: string, payload: unknown) => callbacks[subscriptions[event]!]?.({ event, payload })
     let sequence = 0
-    const state = { authorized: false, canceled: [] as string[], writes: [] as unknown[], restoreCalls: 0, remoteDelay: false, remoteStartFinish: null as null | ((value: unknown) => void), playerOpens: [] as string[], miniChanges: [] as boolean[], fullscreenChanges: [] as boolean[], remoteQualities: [] as number[], remoteStarts: [] as string[], remoteStops: [] as string[], remote: { sessionId:'test-session',stage:'relay_request',failedStage:null,elapsedMs:1000,attempt:1,mediaPackets:0,keyframes:0,codec:null,playbackUrl:null,error:null }, cameraProbes: [] as string[], cameraProbeFinish: null as null | ((value: unknown) => void), finish: null as null | ((value: unknown) => void) }
+    const state = { authorized: false, canceled: [] as string[], writes: [] as unknown[], restoreCalls: 0, remoteDelay: false, remoteStartFinish: null as null | ((value: unknown) => void), playerOpens: [] as string[], miniChanges: [] as boolean[], fullscreenChanges: [] as boolean[], remoteQualities: [] as number[], remoteStarts: [] as string[], remoteStops: [] as string[], remoteControls: [] as unknown[], ptz: [] as unknown[], remote: { sessionId:'test-session',stage:'relay_request',failedStage:null,elapsedMs:1000,attempt:1,mediaPackets:0,keyframes:0,codec:null,playbackUrl:null,error:null }, cameraProbes: [] as string[], cameraProbeFinish: null as null | ((value: unknown) => void), finish: null as null | ((value: unknown) => void) }
     w.__mijiaTest = state
     const snapshot = () => ({ loggedIn: state.authorized, region: 'cn', accountLabel: state.authorized ? '小米账号 · 尾号 5678' : null, devices: state.authorized ? [
       { did: 'light-1', name: '书房灯', model: 'fixture.light.one', home: '我的家', room: '书房', online: true, camera: false },
@@ -43,6 +43,10 @@ async function mijiaFixture(page: Page, rememberFailure = false, expiresIn = 180
         if (command === 'camera_player_fullscreen') {state.fullscreenChanges.push(args.enabled);return {ok:true,data:args.enabled}}
         if (command === 'camera_player_mode') { state.miniChanges.push(args.mini);return {ok:true,data:args.mini} }
         if (command === 'camera_remote_start') { state.remoteQualities.push(args.quality); state.remoteStarts.push(args.did); if (state.remoteDelay) return new Promise(resolve => { state.remoteStartFinish = resolve }); return {ok:true,data:{...state.remote}} }
+        if (command === 'camera_remote_control') { state.remoteControls.push(args); return {ok:true,data:true} }
+        if (command === 'camera_remote_audio') return {ok:true,data:[]}
+        if (command === 'camera_remote_speaker') return {ok:true,data:true}
+        if (command === 'camera_remote_ptz') { state.ptz.push(args); return {ok:true,data:true} }
         if (command === 'camera_remote_status') return {ok:true,data:{...state.remote}}
         if (command === 'camera_remote_stop') { state.remoteStops.push(args.sessionId);return {ok:true,data:true} }
         if (command === 'mijia_get_properties') return { ok: true, data: properties }
@@ -317,4 +321,51 @@ test('quality selection keeps HD as default and restarts once with fluent qualit
   await page.getByRole('combobox',{name:'视频画质'}).selectOption('1')
   await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteQualities)).toEqual([2,1])
   expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStops)).toEqual(['test-session'])
+})
+
+test('viewer controls address its session and stop microphone capture on playback stop', async ({ page }) => {
+  await mijiaFixture(page)
+  await page.addInitScript(() => {
+    const state = (window as any).__mijiaTest
+    state.remote.stage = 'media_ready'
+    const capture = async () => {
+      const context = new AudioContext()
+      const stream = context.createMediaStreamDestination().stream
+      const track = stream.getAudioTracks()[0]!
+      state.testMicrophone = track
+      track.stop = () => {
+        MediaStreamTrack.prototype.stop.call(track)
+        void context.close()
+      }
+      return stream
+    }
+    Object.defineProperty(navigator.mediaDevices, 'getUserMedia', { value: capture })
+  })
+  await page.goto('/?cameraPlayer=1')
+  const listen = page.getByRole('button', { name: '现场声音关' })
+  const talk = page.getByRole('button', { name: '麦克风对讲关' })
+  await expect(listen).toHaveAttribute('aria-pressed', 'false')
+  await expect(talk).toHaveAttribute('aria-pressed', 'false')
+  await listen.click()
+  await expect(page.getByRole('button', { name: '现场声音开' })).toHaveAttribute('aria-pressed', 'true')
+  await page.getByRole('button', { name: '现场声音开' }).click()
+  await talk.click()
+  await expect(page.getByRole('button', { name: '麦克风对讲开' })).toHaveAttribute('aria-pressed', 'true')
+  for (const name of ['向上', '向左', '向下', '向右']) {
+    await page.getByRole('button', { name }).click()
+  }
+  await page.getByRole('button', { name: '停止播放' }).click()
+  await expect(talk).toBeDisabled()
+  expect(await page.evaluate(() => {
+    const state = (window as any).__mijiaTest
+    return {
+      track: state.testMicrophone.readyState,
+      actions: state.remoteControls,
+      directions: state.ptz,
+    }
+  })).toEqual({
+    track: 'ended',
+    actions: ['listen_on', 'listen_off', 'talk_on'].map(action => ({ sessionId: 'test-session', action })),
+    directions: ['up', 'left', 'down', 'right'].map(direction => ({ sessionId: 'test-session', direction })),
+  })
 })

@@ -204,6 +204,15 @@ pub struct MiProperty {
     pub value: Option<Value>,
     pub unavailable: bool,
 }
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraDirection {
+    Left = 1,
+    Right = 2,
+    Up = 3,
+    Down = 4,
+}
+
 #[derive(Default)]
 struct State {
     pending: Option<Pending>,
@@ -762,6 +771,37 @@ impl MiCloud {
             result
         }).await
     }
+    pub async fn camera_ptz(
+        &self,
+        did: &str,
+        direction: CameraDirection,
+    ) -> Result<bool, AppError> {
+        let _operation = self.operation.lock().await;
+        let auth = self.auth().await?;
+        if !did.bytes().all(|byte| byte.is_ascii_digit())
+            || !self.state.lock().await.devices.iter().any(|device| {
+                device.did == did
+                    && device.model == super::mijia_camera::TARGET_MODEL
+                    && device.online
+            })
+        {
+            return Err(AppError::invalid_input("此摄像头当前无法使用云台控制"));
+        }
+        let result = self
+            .request(
+                &auth,
+                &format!("/home/rpc/{did}"),
+                json!({
+                    "id": 1, "method": "set_motor", "params": {"operation": direction as u8}
+                }),
+            )
+            .await?;
+        if result.as_str() == Some("ok") || result.get(0).and_then(Value::as_str) == Some("ok") {
+            return Ok(true);
+        }
+        Err(error("CAMERA_PTZ_REJECTED", "摄像头未确认云台操作", false))
+    }
+
     pub async fn set_property(
         &self,
         did: &str,

@@ -213,7 +213,7 @@ pub struct TransportDiagnostics {
     pub stream_error_channel: Option<u8>,
 }
 pub struct Connection {
-    outgoing: mpsc::Sender<Zeroizing<Vec<u8>>>,
+    outgoing: mpsc::Sender<(u8, Zeroizing<Vec<u8>>)>,
     incoming: mpsc::Receiver<Message>,
     task: Option<JoinHandle<Result<(), AppError>>>,
     diagnostics: Arc<std::sync::Mutex<TransportDiagnostics>>,
@@ -275,9 +275,13 @@ impl Connection {
             return Err(malformed());
         }
         self.outgoing
-            .send(Zeroizing::new(message.to_vec()))
+            .send((0, Zeroizing::new(message.to_vec())))
             .await
             .map_err(|_| failure("CS2_CHANNEL_CLOSED", "摄像头连接已关闭"))
+    }
+    pub fn speaker(&self, packet: Zeroizing<Vec<u8>>) {
+        // Real-time voice drops stale frames when the transport queue is full.
+        let _ = self.outgoing.try_send((3, packet));
     }
     pub async fn next(&mut self) -> Result<Message, AppError> {
         if let Some(msg) = self.incoming.recv().await {
@@ -316,13 +320,14 @@ struct Pending {
 async fn transport(
     socket: UdpSocket,
     local: SocketAddrV4,
-    mut commands: mpsc::Receiver<Zeroizing<Vec<u8>>>,
+    mut commands: mpsc::Receiver<(u8, Zeroizing<Vec<u8>>)>,
     messages: mpsc::Sender<Message>,
     linked: oneshot::Sender<()>,
     diagnostics: Arc<std::sync::Mutex<TransportDiagnostics>>,
 ) -> Result<(), AppError> {
     let mut linked = Some(linked);
     let mut sequence = 0u16;
+    let mut speaker_sequence = 0u16;
     let mut outstanding: BTreeMap<u16, Pending> = BTreeMap::new();
     let mut command_rx = Receiver::default();
     let mut media_rx = Receiver::default();
@@ -333,14 +338,17 @@ async fn transport(
     loop {
         tokio::select! {
             message=commands.recv(), if outstanding.len()<=31 => {
-                let Some(message)=message else { let _=socket.send(&frame(CLOSE,&[])).await;return Ok(()); };
+                let Some((channel, message))=message else { let _=socket.send(&frame(CLOSE,&[])).await;return Ok(()); };
                 let mut stream=Zeroizing::new((message.len() as u32).to_be_bytes().to_vec());stream.extend(&*message);
                 for bytes in stream.chunks(1024) {
-                    let mut body=Zeroizing::new(vec![0xd1,0]);body.extend(sequence.to_be_bytes());body.extend(bytes);
+                    let seq = if channel == 0 { &mut sequence } else { &mut speaker_sequence };
+                    let mut body=Zeroizing::new(vec![0xd1,channel]);body.extend(seq.to_be_bytes());body.extend(bytes);
                     let packet=Zeroizing::new(frame(DATA,&body));
                     socket.send(&packet).await.map_err(|_|io_error())?;
-                    outstanding.insert(sequence,Pending {bytes:packet,sent:Instant::now(),attempts:1});
-                    sequence=sequence.wrapping_add(1);
+                    if channel == 0 {
+                        outstanding.insert(*seq,Pending {bytes:packet,sent:Instant::now(),attempts:1});
+                    }
+                    *seq=seq.wrapping_add(1);
                 }
             }
             received=socket.recv(&mut buffer) => {

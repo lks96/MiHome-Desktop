@@ -7,12 +7,15 @@ use super::{
 use crate::errors::AppError;
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     future::Future,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::{sync::watch, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot, watch},
+    task::JoinHandle,
+};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +35,22 @@ pub struct StreamStatus {
     pub timing_diagnostics: Option<super::media_timing::TimingDiagnostics>,
     pub requested_quality: u8,
 }
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaControl {
+    ListenOn,
+    ListenOff,
+    TalkOn,
+    TalkOff,
+}
+
+struct ControlRequest {
+    action: MediaControl,
+    reply: oneshot::Sender<Result<(), AppError>>,
+}
+
+type AudioQueue = Arc<Mutex<VecDeque<miss::AudioPacket>>>;
+
 struct Entry {
     did: String,
     owner: String,
@@ -40,6 +59,9 @@ struct Entry {
     lease: Arc<Mutex<Instant>>,
     cancel: watch::Sender<bool>,
     task: JoinHandle<()>,
+    controls: mpsc::Sender<ControlRequest>,
+    speaker: mpsc::Sender<zeroize::Zeroizing<Vec<u8>>>,
+    audio: AudioQueue,
 }
 #[derive(Clone, Default)]
 pub struct CameraStreams {
@@ -100,17 +122,32 @@ impl CameraStreams {
         let lease = Arc::new(Mutex::new(born));
         let heartbeat = lease.clone();
         let (cancel, mut cancelled) = watch::channel(false);
+        let (controls, control_rx) = mpsc::channel(4);
+        let (speaker, speaker_rx) = mpsc::channel(4);
+        let audio = AudioQueue::default();
+        let media = MediaControls {
+            control_rx,
+            speaker_rx,
+            audio: audio.clone(),
+        };
         let task = tokio::spawn(async move {
             let mut link = None;
             let mut output = None;
             let mut stop_message = None;
+            let mut speaker_stop = None;
             let outcome = tokio::select! {
-                result=run(provision,&state,&mut link,&mut output,&mut stop_message,quality)=>result,
+                result=run(provision,&state,&mut link,&mut output,&mut stop_message,quality,media,&mut speaker_stop)=>result,
                 _=cancelled.changed()=>Ok(()),
                 _=async {loop {tokio::time::sleep(Duration::from_secs(5)).await;if heartbeat.lock().unwrap().elapsed()>Duration::from_secs(40){break;}}}=>Err(failure("CAMERA_LEASE_EXPIRED","播放页面已关闭，视频会话已释放")),
             };
             state.lock().unwrap().playback_url = None;
             if let Some(mut connection) = link {
+                // Stop the camera speaker before tearing down the media session.
+                if let Some(stop) = speaker_stop {
+                    let _ =
+                        tokio::time::timeout(Duration::from_millis(300), connection.command(&stop))
+                            .await;
+                }
                 if let Some(stop) = stop_message {
                     let _ =
                         tokio::time::timeout(Duration::from_millis(300), connection.command(&stop))
@@ -143,6 +180,9 @@ impl CameraStreams {
                 lease,
                 cancel,
                 task,
+                controls,
+                speaker,
+                audio,
             },
         );
         Ok(initial)
@@ -161,6 +201,67 @@ impl CameraStreams {
         status.elapsed_ms = entry.born.elapsed().as_millis() as u64;
         Ok(status)
     }
+    pub async fn control(
+        &self,
+        id: &str,
+        owner: &str,
+        action: MediaControl,
+    ) -> Result<bool, AppError> {
+        let controls = {
+            let entries = self.entries.lock().await;
+            let entry = entries
+                .get(id)
+                .filter(|entry| entry.owner == owner)
+                .ok_or_else(session_gone)?;
+            if entry.status.lock().unwrap().stage != "media_ready" {
+                return Err(failure("CAMERA_NOT_READY", "请等待摄像头开始播放"));
+            }
+            entry.controls.clone()
+        };
+        let (reply, result) = oneshot::channel();
+        controls
+            .try_send(ControlRequest { action, reply })
+            .map_err(|_| failure("CAMERA_CONTROL_BUSY", "摄像头控制暂时繁忙，请重试"))?;
+        tokio::time::timeout(Duration::from_secs(3), result)
+            .await
+            .map_err(|_| failure("CAMERA_CONTROL_TIMEOUT", "摄像头控制超时"))?
+            .map_err(|_| session_gone())??;
+        Ok(true)
+    }
+
+    pub async fn audio(&self, id: &str, owner: &str) -> Result<Vec<miss::AudioPacket>, AppError> {
+        let entries = self.entries.lock().await;
+        let entry = entries
+            .get(id)
+            .filter(|entry| entry.owner == owner)
+            .ok_or_else(session_gone)?;
+        Ok(entry.audio.lock().unwrap().drain(..).collect())
+    }
+
+    pub async fn speaker(&self, id: &str, owner: &str, samples: Vec<u8>) -> Result<bool, AppError> {
+        if samples.len() != 320 {
+            return Err(AppError::invalid_input("对讲音频帧长度错误"));
+        }
+        let entries = self.entries.lock().await;
+        let entry = entries
+            .get(id)
+            .filter(|entry| entry.owner == owner)
+            .ok_or_else(session_gone)?;
+        Ok(entry
+            .speaker
+            .try_send(zeroize::Zeroizing::new(samples))
+            .is_ok())
+    }
+
+    pub async fn device(&self, id: &str, owner: &str) -> Result<String, AppError> {
+        let entries = self.entries.lock().await;
+        entries
+            .get(id)
+            .filter(|entry| entry.owner == owner && !entry.task.is_finished())
+            .map(|entry| entry.did.clone())
+            .ok_or_else(session_gone)
+    }
+
     pub async fn stop(&self, id: &str) {
         let entry = self.entries.lock().await.remove(id);
         if let Some(mut entry) = entry {
@@ -237,6 +338,16 @@ impl CameraStreams {
     }
 }
 
+fn session_gone() -> AppError {
+    failure("CAMERA_SESSION_GONE", "视频会话已结束，请重新连接")
+}
+
+struct MediaControls {
+    control_rx: mpsc::Receiver<ControlRequest>,
+    speaker_rx: mpsc::Receiver<zeroize::Zeroizing<Vec<u8>>>,
+    audio: AudioQueue,
+}
+
 async fn run<F>(
     provision: F,
     status: &Arc<Mutex<StreamStatus>>,
@@ -244,6 +355,8 @@ async fn run<F>(
     pipeline: &mut Option<MediaOutput>,
     stop_message: &mut Option<zeroize::Zeroizing<Vec<u8>>>,
     quality: u8,
+    mut media: MediaControls,
+    speaker_stop: &mut Option<zeroize::Zeroizing<Vec<u8>>>,
 ) -> Result<(), AppError>
 where
     F: Future<Output = Result<RemoteGrant, AppError>>,
@@ -297,18 +410,69 @@ where
     let mut primed = false;
     let mut ready = false;
     let mut headers = zeroize::Zeroizing::new(Vec::new());
+    let mut listening = false;
+    let mut speaker_ready_at = None;
     loop {
-        let result = tokio::time::timeout(Duration::from_secs(15), conn.next()).await;
+        let deadline = tokio::time::Instant::from_std(received + Duration::from_secs(20));
+        let message = tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(failure("MISS_MEDIA_TIMEOUT", "摄像头视频数据中断"));
+            }
+            Some(request) = media.control_rx.recv() => {
+                if request.reply.is_closed() {
+                    continue;
+                }
+                let command = match request.action {
+                    MediaControl::ListenOn => 0x104,
+                    MediaControl::ListenOff => 0x105,
+                    MediaControl::TalkOn => 0x106,
+                    MediaControl::TalkOff => 0x108,
+                };
+                let wire = miss::encrypted_command(&grant.key, command, &[]);
+                let result = tokio::time::timeout(Duration::from_secs(2), conn.command(&wire))
+                    .await.unwrap_or_else(|_| Err(failure("CAMERA_CONTROL_TIMEOUT", "摄像头控制超时")));
+                if result.is_ok() {
+                    match request.action {
+                        MediaControl::ListenOn => listening = true,
+                        MediaControl::ListenOff => {
+                            listening = false;
+                            media.audio.lock().unwrap().clear();
+                        }
+                        MediaControl::TalkOn => {
+                            *speaker_stop = Some(zeroize::Zeroizing::new(miss::encrypted_command(&grant.key, 0x108, &[])));
+                            speaker_ready_at = Some(Instant::now() + Duration::from_secs(1));
+                        }
+                        MediaControl::TalkOff => {
+                            *speaker_stop = None;
+                            speaker_ready_at = None;
+                        }
+                    }
+                }
+                let _ = request.reply.send(result);
+                continue;
+            }
+            Some(samples) = media.speaker_rx.recv() => {
+                if speaker_ready_at.is_some_and(|time| time <= Instant::now()) {
+                    conn.speaker(miss::speaker_packet(&grant.key, &samples));
+                }
+                continue;
+            }
+            message = conn.next() => message?,
+        };
         status.lock().unwrap().transport_diagnostics = Some(conn.diagnostics());
-        let message =
-            result.map_err(|_| failure("MISS_MEDIA_TIMEOUT", "摄像头未返回视频数据"))??;
-        if received.elapsed() > Duration::from_secs(20) {
-            return Err(failure("MISS_MEDIA_TIMEOUT", "摄像头视频数据中断"));
-        }
         if message.channel != 2 {
             continue;
         }
         let Some(video) = miss::video(&grant.key, &message.bytes)? else {
+            if listening {
+                if let Some(packet) = miss::audio(&grant.key, &message.bytes) {
+                    let mut audio = media.audio.lock().unwrap();
+                    if audio.len() >= 16 {
+                        audio.pop_front();
+                    }
+                    audio.push_back(packet);
+                }
+            }
             continue;
         };
         received = Instant::now();

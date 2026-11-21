@@ -67,6 +67,62 @@ pub async fn camera_remote_stop(
 }
 
 #[tauri::command]
+pub async fn camera_remote_control(
+    service: tauri::State<'_, MiCloud>,
+    window: tauri::WebviewWindow,
+    session_id: String,
+    action: crate::services::camera_stream::MediaControl,
+) -> Result<ApiResult<bool>, ()> {
+    Ok(service
+        .cameras
+        .control(&session_id, window.label(), action)
+        .await
+        .into())
+}
+
+#[tauri::command]
+pub async fn camera_remote_audio(
+    service: tauri::State<'_, MiCloud>,
+    window: tauri::WebviewWindow,
+    session_id: String,
+) -> Result<ApiResult<Vec<crate::services::miss::AudioPacket>>, ()> {
+    Ok(service
+        .cameras
+        .audio(&session_id, window.label())
+        .await
+        .into())
+}
+
+#[tauri::command]
+pub async fn camera_remote_speaker(
+    service: tauri::State<'_, MiCloud>,
+    window: tauri::WebviewWindow,
+    session_id: String,
+    samples: Vec<u8>,
+) -> Result<ApiResult<bool>, ()> {
+    Ok(service
+        .cameras
+        .speaker(&session_id, window.label(), samples)
+        .await
+        .into())
+}
+
+#[tauri::command]
+pub async fn camera_remote_ptz(
+    service: tauri::State<'_, MiCloud>,
+    window: tauri::WebviewWindow,
+    session_id: String,
+    direction: crate::services::mijia::CameraDirection,
+) -> Result<ApiResult<bool>, ()> {
+    let result = async {
+        let did = service.cameras.device(&session_id, window.label()).await?;
+        service.camera_ptz(&did, direction).await
+    }
+    .await;
+    Ok(result.into())
+}
+
+#[tauri::command]
 pub async fn mijia_camera_probe(
     service: tauri::State<'_, MiCloud>,
     did: String,

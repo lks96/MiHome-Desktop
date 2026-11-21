@@ -3,6 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Hls from 'hls.js'
 import { NAlert, NButton, NTag } from 'naive-ui'
 import { call } from '../utils/ipc'
+import { CameraAudio, type CameraAudioPacket } from '../utils/camera-audio'
+import microphoneWorklet from '../utils/camera-mic.worklet.js?url&no-inline'
 import type { AppError } from '../types/settings'
 import { useDesktopStore } from '../stores/desktop'
 import { version as clientVersion } from '../../package.json'
@@ -19,6 +21,24 @@ const playing = ref(false)
 const decodedFrames = ref(0)
 const localError = ref('')
 const clientErrorCode = ref<string | null>(null)
+const controlError = ref('')
+const listening = ref(false)
+const talking = ref(false)
+const audioBusy = ref(false)
+const talkBusy = ref(false)
+const ptzBusy = ref(false)
+const cameraControlsReady = computed(() => running.value && status.value?.stage === 'media_ready')
+const directions = [
+  { id: 'up', label: '向上', icon: '↑' },
+  { id: 'left', label: '向左', icon: '←' },
+  { id: 'down', label: '向下', icon: '↓' },
+  { id: 'right', label: '向右', icon: '→' },
+]
+let cameraAudio: CameraAudio | null = null
+let audioTimer: ReturnType<typeof setTimeout> | undefined
+let micStream: MediaStream | null = null
+let micContext: AudioContext | null = null
+let micNode: AudioWorkletNode | null = null
 const copied = ref('')
 const stageElement=ref<HTMLElement|null>(null)
 const mini=ref(false)
@@ -51,7 +71,167 @@ let frame: number | null = null
 let attempts = 0
 let lastFrame = 0
 const current = (token: number) => alive && token === generation
+function closeAudio() {
+  clearTimeout(audioTimer)
+  cameraAudio?.close()
+  cameraAudio = null
+  listening.value = false
+}
+
+function closeMicrophone() {
+  micStream?.getTracks().forEach(track => track.stop())
+  micStream = null
+  micNode?.disconnect()
+  if (micNode) micNode.port.onmessage = null
+  micNode = null
+  if (micContext) void micContext.close().catch(() => {})
+  micContext = null
+  talking.value = false
+}
+
+async function pollAudio(sessionId: string, player: CameraAudio) {
+  const result = await call<CameraAudioPacket[]>('camera_remote_audio', { sessionId })
+  if (id !== sessionId || player !== cameraAudio) return
+  if (!result.ok) {
+    closeAudio()
+    controlError.value = result.error.message
+    return
+  }
+  try {
+    for (const packet of result.data) player.play(packet)
+  } catch {
+    closeAudio()
+    controlError.value = '当前 WebView2 无法解码摄像头声音'
+    void call('camera_remote_control', { sessionId, action: 'listen_off' })
+    return
+  }
+  audioTimer = setTimeout(() => void pollAudio(sessionId, player), 80)
+}
+
+async function toggleAudio() {
+  const sessionId = id
+  if (!sessionId || audioBusy.value) return
+  audioBusy.value = true
+  controlError.value = ''
+  const enable = !listening.value
+  try {
+    if (enable) {
+      const context = new AudioContext()
+      cameraAudio = new CameraAudio(context, () => {
+        if (id !== sessionId || cameraAudio !== player) return
+        closeAudio()
+        controlError.value = '无法解码摄像头声音'
+        void call('camera_remote_control', { sessionId, action: 'listen_off' })
+      })
+      const player = cameraAudio
+      await context.resume()
+      if (id !== sessionId || player !== cameraAudio) return
+    } else {
+      closeAudio()
+    }
+    const result = await call<boolean>('camera_remote_control', {
+      sessionId, action: enable ? 'listen_on' : 'listen_off',
+    })
+    if (id !== sessionId) return
+    if (!result.ok) {
+      closeAudio()
+      controlError.value = result.error.message
+      return
+    }
+    listening.value = enable
+    if (cameraAudio) void pollAudio(sessionId, cameraAudio)
+  } catch {
+    if (id !== sessionId) return
+    closeAudio()
+    controlError.value = '无法打开现场声音，请检查系统音频设置'
+  } finally {
+    if (id === sessionId) audioBusy.value = false
+  }
+}
+
+async function toggleTalk() {
+  const sessionId = id
+  if (!sessionId || talkBusy.value) return
+  talkBusy.value = true
+  controlError.value = ''
+  const enable = !talking.value
+  try {
+    if (enable) {
+      const context = new AudioContext()
+      micContext = context
+      await context.resume()
+      if (id !== sessionId) return
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+      })
+      if (id !== sessionId) {
+        stream.getTracks().forEach(track => track.stop())
+        return
+      }
+      micStream = stream
+      await context.audioWorklet.addModule(microphoneWorklet)
+      if (id !== sessionId) return
+      const node = new AudioWorkletNode(context, 'camera-microphone')
+      micNode = node
+      context.createMediaStreamSource(stream).connect(node).connect(context.destination)
+      let sending = false
+      node.port.onmessage = async ({ data }: MessageEvent<Uint8Array>) => {
+        if (!talking.value || id !== sessionId || node !== micNode || sending) return
+        sending = true
+        try {
+          const result = await call<boolean>('camera_remote_speaker', { sessionId, samples: Array.from(data) })
+          if (!result.ok && id === sessionId && talking.value) {
+            await toggleTalk()
+            if (id === sessionId) controlError.value = result.error.message
+          }
+        } finally {
+          sending = false
+        }
+      }
+      for (const track of stream.getTracks()) track.addEventListener('ended', () => {
+        if (id === sessionId && talking.value) void toggleTalk()
+      })
+    } else {
+      closeMicrophone()
+    }
+    const result = await call<boolean>('camera_remote_control', {
+      sessionId, action: enable ? 'talk_on' : 'talk_off',
+    })
+    if (id !== sessionId) return
+    if (!result.ok) {
+      closeMicrophone()
+      controlError.value = result.error.message
+      return
+    }
+    talking.value = enable
+  } catch {
+    if (id !== sessionId) return
+    closeMicrophone()
+    controlError.value = '无法打开麦克风，请检查设备和 Windows 麦克风权限'
+  } finally {
+    if (id === sessionId) talkBusy.value = false
+  }
+}
+
+async function moveCamera(direction: string) {
+  const sessionId = id
+  if (!sessionId || ptzBusy.value) return
+  ptzBusy.value = true
+  controlError.value = ''
+  const result = await call<boolean>('camera_remote_ptz', { sessionId, direction })
+  if (id !== sessionId) return
+  ptzBusy.value = false
+  if (!result.ok) controlError.value = result.error.message
+}
+
 async function release() {
+  closeAudio()
+  closeMicrophone()
+  audioBusy.value = false
+  talkBusy.value = false
+  ptzBusy.value = false
+  controlError.value = ''
+
   if (timer) clearTimeout(timer)
   if (watchdog) clearInterval(watchdog)
   timer = null; watchdog = null
@@ -153,11 +333,19 @@ onBeforeUnmount(() => { alive = false; generation++; document.removeEventListene
 <template>
   <section class="remote-camera" :class="{standalone,mini}">
     <div class="remote-title"><h3>{{ name || '远程观看' }}</h3><NTag :type="playing ? 'success' : 'default'" size="small">{{ running && !status ? '正在连接' : label }}</NTag></div>
-    <p v-if="!mini&&!standalone">直接连接摄像头 · 当前支持视频观看</p>
+    <p v-if="!mini&&!standalone">直接连接摄像头</p>
     <div v-if="!mini" class="quality-control"><label>画质 <select aria-label="视频画质" :value="quality" @change="selectQuality"><option v-for="option in qualityOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label></div>
     <div v-if="status?.playbackUrl" ref="stageElement" class="remote-stage"><video ref="video" autoplay muted playsinline aria-label="米家远程摄像头画面" @waiting="waiting"></video><p v-if="!playing">等待画面解码…</p></div>
     <NAlert v-if="localError" type="warning" class="remote-notice">{{ localError }}</NAlert>
     <div class="remote-actions"><NButton v-if="!mini" type="primary" :disabled="!online || running || (!standalone&&!desktop.visible)" @click="start()">远程播放</NButton><NButton :disabled="!running" @click="stop">停止播放</NButton><NButton v-if="status?.playbackUrl" @click="fullscreen">{{ nativeFullscreen?'退出全屏':'全屏' }}</NButton><NButton v-if="standalone" @click="toggleMini">{{ mini?'退出小窗':'小窗模式' }}</NButton><NButton v-if="!mini&&(status || localError)" @click="copy">复制连接结果</NButton></div>
+    <div class="remote-actions camera-controls" aria-label="摄像头控制">
+      <NButton size="small" :disabled="!cameraControlsReady || audioBusy" :aria-pressed="listening" @click="toggleAudio">现场声音{{ listening ? '开' : '关' }}</NButton>
+      <NButton size="small" :disabled="!cameraControlsReady || talkBusy" :aria-pressed="talking" @click="toggleTalk">麦克风对讲{{ talking ? '开' : '关' }}</NButton>
+      <div class="ptz-controls" role="group" aria-label="云台方向">
+        <NButton v-for="direction in directions" :key="direction.id" size="small" :disabled="!cameraControlsReady || ptzBusy" :aria-label="direction.label" :title="direction.label" @click="moveCamera(direction.id)">{{ direction.icon }}</NButton>
+      </div>
+    </div>
+    <NAlert v-if="controlError" type="warning" class="remote-notice">{{ controlError }}</NAlert>
     <small v-if="copied" role="status">{{ copied }}</small>
     <details v-if="status&&!mini"><summary>连接结果</summary><pre data-remote-camera-result>{{ diagnostic }}</pre></details>
   </section>
@@ -169,3 +357,9 @@ onBeforeUnmount(() => { alive = false; generation++; document.removeEventListene
 .quality-control{display:flex;align-items:center;gap:12px;margin:12px 0;font-size:12px;color:#8792a5}.quality-control .n-select{width:140px}.standalone .remote-stage{height:calc(100vh - 208px);min-height:160px;aspect-ratio:auto}.mini .remote-stage{height:calc(100vh - 96px);min-height:120px}.remote-stage:fullscreen{width:100vw;height:100vh;aspect-ratio:auto;border-radius:0}.mini .remote-actions{margin-top:6px}.remote-title h3{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:12px}
 </style>
 <style scoped>.quality-control select{width:130px;margin-left:12px;padding:7px 10px;border:1px solid #8792a555;border-radius:6px;background:transparent;color:inherit;font:inherit}.quality-control option{background:white;color:#172238}</style>
+
+<style scoped>
+.camera-controls,.ptz-controls{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.standalone .remote-stage{height:calc(100vh - 244px)}
+.mini .remote-stage{height:calc(100vh - 129px)}
+</style>

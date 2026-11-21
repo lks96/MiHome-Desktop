@@ -56,7 +56,7 @@ Tauri CLI 在 Linux 主机上即使打包 Windows 目标也会检测 AppIndicato
 
 ## GitHub Actions 备选
 
-`.github/workflows/windows-build.yml` 提供手动 Windows 构建任务，会生成 exe、安装包、SHA256SUMS.txt 与测试清单。该工作流尚未在 GitHub 执行，不会自动发布 Release。代码推送后，才能在仓库 Actions 使用它。
+`.github/workflows/windows-build.yml` 提供手动 Windows 构建任务，会生成 exe、安装包、SHA256SUMS.txt 与测试清单。手动运行生成 Actions 构建产物。推送 `v*-cs2.*` 标签时，工作流还会将 NSIS 安装包和 SHA-256 校验文件上传到 GitHub 预发布版本。
 
 官方交叉构建依据：https://v2.tauri.app/distribute/windows-installer/#build-windows-apps-on-linux-and-macos
 
