@@ -49,7 +49,41 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked
       - name: Build Windows executable and NSIS installer
         run: pnpm tauri build --bundles nsis -- --locked
-      - name: Verify Windows installer and application startup
+      - name: Seed a database from the previous Windows schema
+        shell: pwsh
+        run: |
+          @'
+          import hashlib
+          import os
+          import sqlite3
+          from pathlib import Path
+
+          data_dir = Path(os.environ["APPDATA"]) / "com.lks96.mihome-desktop"
+          data_dir.mkdir(parents=True, exist_ok=True)
+          with sqlite3.connect(data_dir / "mihome.sqlite") as db:
+              db.execute("""
+                  CREATE TABLE _sqlx_migrations (
+                      version BIGINT PRIMARY KEY,
+                      description TEXT NOT NULL,
+                      installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      success BOOLEAN NOT NULL,
+                      checksum BLOB NOT NULL,
+                      execution_time BIGINT NOT NULL
+                  )
+              """)
+              for path in sorted(Path("src-tauri/src/database/migrations").glob("*.sql")):
+                  version, description = path.stem.split("_", 1)
+                  if int(version) not in range(1, 6):
+                      continue
+                  sql = path.read_text(encoding="utf-8").replace("\n", "\r\n")
+                  db.executescript(sql)
+                  db.execute(
+                      "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (?, ?, 1, ?, 0)",
+                      (int(version), description, hashlib.sha384(sql.encode("utf-8")).digest()),
+                  )
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the upgrade-test database' }
+      - name: Verify Windows installer and startup with a legacy database
         shell: pwsh
         timeout-minutes: 4
         run: |
@@ -129,5 +163,5 @@ jobs:
           sha256sum MiHome-Desktop-Windows-x64-setup.exe > Windows-Installer-SHA256SUMS.txt
           gh release create "$GITHUB_REF_NAME" \
             --verify-tag --prerelease --title "$GITHUB_REF_NAME Windows x64" \
-            --notes '启动改进版。主窗口在本地服务初始化后创建，启动失败会显示失败阶段。包含现场声音、麦克风对讲和四向云台。安装包未签名。' \
+            --notes '修复旧数据库因迁移脚本换行差异而无法启动的问题。保留现有数据库和配置，可直接覆盖安装。安装包未签名。' \
             MiHome-Desktop-Windows-x64-setup.exe Windows-Installer-SHA256SUMS.txt

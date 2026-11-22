@@ -37,7 +37,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(desktop::window_event)
         .setup(|app| {
-            let initialize = || -> Result<(), &'static str> {
+            let initialize = || -> Result<(), String> {
                 match app
                     .path()
                     .app_log_dir()
@@ -57,7 +57,7 @@ pub fn run() {
                 let database = tauri::async_runtime::block_on(database::Database::open(
                     &data_dir.join("mihome.sqlite"),
                 ))
-                .map_err(|_| "无法打开或升级本地数据库")?;
+                .map_err(|error| database::startup_error_message(error.as_ref()))?;
                 let settings =
                     tauri::async_runtime::block_on(database.settings()).unwrap_or_else(|error| {
                         tracing::warn!(
@@ -132,7 +132,7 @@ pub fn run() {
                 Ok(())
             };
             if let Err(stage) = initialize() {
-                tracing::error!(stage, "Application startup failed");
+                tracing::error!(stage = %stage, "Application startup failed");
                 let handle = app.handle().clone();
                 app.dialog()
                     .message(format!("Mi Home Desktop 启动失败。\n{stage}"))
