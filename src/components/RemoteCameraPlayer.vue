@@ -61,8 +61,7 @@ const mini=ref(false)
 const nativeFullscreen=ref(false)
 const webFullscreen = ref(false)
 const isFullscreen = computed(() => nativeFullscreen.value || webFullscreen.value)
-const quality=ref(2)
-const qualityOptions=[{label:'自动',value:0},{label:'流畅',value:1},{label:'高清',value:2},{label:'超清',value:3}]
+const highestQuality = 3
 const playback=ref({width:0,height:0,decodedFps:null as number|null,droppedFrames:0,waitingEvents:0,bufferedAheadSeconds:0,hlsLatencySeconds:null as number|null})
 let recentFrames:number[]=[]
 const labels: Record<string, string> = { provisioning: '正在获取视频授权', rendezvous: '正在连接会合服务', relay_candidate: '正在选择远程节点', relay_request: '正在等待摄像头加入', relay_ready: '远程节点已就绪', session_linking: '正在连接摄像头会话', session_established: '远程会话已建立', miss_authenticating: '正在验证视频权限', miss_authenticated: '视频权限已确认', waiting_media: '正在等待视频', preparing_video: '正在处理视频', media_ready: '正在等待画面', failed: '连接失败', stopped: '已停止' }
@@ -74,7 +73,7 @@ const diagnostic = computed(() => {
   const a = status.value?.authDiagnostics
   const t = status.value?.transportDiagnostics
   const timing=status.value?.timingDiagnostics
-  return JSON.stringify({ diagnosticSchema: 5, clientVersion, model: 'chuangmi.camera.039a01', transport: 'cs2', stage: status.value?.stage ?? 'idle', failedStage: status.value?.failedStage ?? null, errorCode: status.value?.error?.code ?? clientErrorCode.value, elapsedMs: status.value?.elapsedMs ?? 0, mediaPackets: status.value?.mediaPackets ?? 0, keyframes: status.value?.keyframes ?? 0, codec: status.value?.codec ?? null, decodedFrames: decodedFrames.value, remotePlaybackVerified: decodedFrames.value > 0,requestedQuality:status.value?.requestedQuality??quality.value,
+  return JSON.stringify({ diagnosticSchema: 5, clientVersion, model: 'chuangmi.camera.039a01', transport: 'cs2', stage: status.value?.stage ?? 'idle', failedStage: status.value?.failedStage ?? null, errorCode: status.value?.error?.code ?? clientErrorCode.value, elapsedMs: status.value?.elapsedMs ?? 0, mediaPackets: status.value?.mediaPackets ?? 0, keyframes: status.value?.keyframes ?? 0, codec: status.value?.codec ?? null, decodedFrames: decodedFrames.value, remotePlaybackVerified: decodedFrames.value > 0,requestedQuality:status.value?.requestedQuality??highestQuality,
     ptzDiagnostics: { acknowledged: ptzAcknowledged.value, errorCode: ptzErrorCode.value },
     authDiagnostics: a ? { messages: a.messages, messageKind: a.messageKind, commandByteOrder: a.commandByteOrder, bodyBytes: a.bodyBytes, trailingPaddingBytes: a.trailingPaddingBytes, encrypted: a.encrypted, jsonShape: a.jsonShape, jsonErrorCategory: a.jsonErrorCategory } : null,
     transportDiagnostics: t ? { linkRequests: t.linkRequests, linkNonRequests: t.linkNonRequests, commandMessages: t.commandMessages, mediaMessages: t.mediaMessages, streamErrorChannel: t.streamErrorChannel } : null,
@@ -421,15 +420,13 @@ async function start(reset = true) {
   decodedFrames.value = 0
   recentFrames=[];playback.value={width:0,height:0,decodedFps:null,droppedFrames:0,waitingEvents:0,bufferedAheadSeconds:0,hlsLatencySeconds:null}
   copied.value = ''; localError.value = ''; clientErrorCode.value = null; status.value = null; running.value = true
-  const result = await call<Status>('camera_remote_start', { did: props.did,quality:quality.value })
+  const result = await call<Status>('camera_remote_start', { did: props.did,quality: highestQuality })
   if (!current(token)) { if (result.ok) await call<boolean>('camera_remote_stop', { sessionId: result.data.sessionId }); return }
   if (!result.ok) { running.value = false; localError.value = result.error.message; clientErrorCode.value = result.error.code; return }
   id = result.data.sessionId; status.value = result.data
   void poll(token, id)
 }
 async function copy() { try { await navigator.clipboard.writeText(diagnostic.value); copied.value = '已复制连接结果' } catch { copied.value = '请手动复制下方结果' } }
-function changeQuality(value:number) {quality.value=value;if(running.value)void start()}
-function selectQuality(event:Event){changeQuality(Number((event.target as HTMLSelectElement).value))}
 async function fullscreen(){try{if(props.standalone){const result=await call<boolean>('camera_player_fullscreen',{enabled:!nativeFullscreen.value});if(result.ok)nativeFullscreen.value=result.data;else localError.value=result.error.message}else if(document.fullscreenElement)await document.exitFullscreen();else await stageElement.value?.requestFullscreen()}catch{localError.value='无法进入全屏，请重试'}}
 async function toggleMini(){if(document.fullscreenElement)await document.exitFullscreen();if(nativeFullscreen.value)await fullscreen();const result=await call<boolean>('camera_player_mode',{mini:!mini.value});if(result.ok)mini.value=result.data;else localError.value=result.error.message}
 function escapeFullscreen(event: KeyboardEvent) {
@@ -492,9 +489,6 @@ onBeforeUnmount(() => { alive = false; generation++; document.removeEventListene
             :disabled="!cameraControlsReady || talkBusy" :aria-pressed="talking" @click="toggleTalk">
             <MicOutline v-if="talking" /><MicOffOutline v-else />
           </button>
-          <select aria-label="视频画质" title="视频画质" :value="quality" @change="selectQuality">
-            <option v-for="option in qualityOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-          </select>
           <button v-if="standalone" type="button" :aria-label="mini ? '退出小窗' : '小窗模式'"
             :title="mini ? '退出小窗' : '小窗模式'" :aria-pressed="mini" @click="toggleMini"><BrowsersOutline /></button>
           <button v-if="status?.playbackUrl" type="button" :aria-label="isFullscreen ? '退出全屏' : '全屏'"
@@ -632,18 +626,6 @@ onBeforeUnmount(() => { alive = false; generation++; document.removeEventListene
 .camera-toolbar button:not(:disabled):hover { background: #ffffff30; }
 .camera-toolbar button[aria-pressed="true"] { color: #8de4c6; background: #103b36d9; }
 .camera-toolbar button:disabled { opacity: .42; cursor: default; }
-.camera-toolbar select {
-  margin-left: auto;
-  height: 32px;
-  padding: 0 5px;
-  color: inherit;
-  color-scheme: dark;
-  border: 1px solid #ffffff45;
-  border-radius: 6px;
-  background: #0b0f16bd;
-  font: inherit;
-  font-size: 12px;
-}
 .camera-notice {
   position: absolute;
   inset: auto 12px 58px;

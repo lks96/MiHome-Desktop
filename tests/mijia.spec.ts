@@ -334,11 +334,14 @@ test('standalone viewer autoplays and switches floating size without restarting 
   expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStops)).toEqual([])
 })
 
-test('quality selection keeps HD as default and requests full quality from the camera', async ({ page }) => {
-  await mijiaFixture(page);await page.goto('/?cameraPlayer=1')
-  await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteQualities)).toEqual([2])
-  await page.getByRole('combobox',{name:'视频画质'}).selectOption('3')
-  await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteQualities)).toEqual([2,3])
+test('viewer always requests the highest quality when starting and restarting', async ({ page }) => {
+  await mijiaFixture(page)
+  await page.goto('/?cameraPlayer=1')
+  await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteQualities)).toEqual([3])
+  await expect(page.getByRole('combobox', { name: '视频画质' })).toHaveCount(0)
+  await page.getByRole('button', { name: '停止播放', exact: true }).click()
+  await page.getByRole('button', { name: '远程播放', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteQualities)).toEqual([3, 3])
   expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStops)).toEqual(['test-session'])
 })
 
