@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Hls from 'hls.js'
 import { NAlert, NTag } from 'naive-ui'
-import { BrowsersOutline, ContractOutline, CopyOutline, ExpandOutline, MicOffOutline, MicOutline, PauseOutline, PlayOutline, StopOutline, VolumeHighOutline, VolumeMuteOutline } from '@vicons/ionicons5'
+import { BrowsersOutline, ContractOutline, CopyOutline, EllipsisHorizontalOutline, ExpandOutline, CloseOutline, MicOffOutline, MicOutline, PauseOutline, PlayOutline, StopOutline, VolumeHighOutline, VolumeMuteOutline } from '@vicons/ionicons5'
 import { call } from '../utils/ipc'
 import { CameraAudio, type CameraAudioPacket } from '../utils/camera-audio'
 import microphoneWorklet from '../utils/camera-mic.worklet.js?url&no-inline'
@@ -20,6 +20,17 @@ const video = ref<HTMLVideoElement | null>(null)
 const running = ref(false)
 const playing = ref(false)
 const paused = ref(false)
+const controlsVisible = ref(true)
+const diagnosticsVisible = ref(false)
+let controlsTimer: ReturnType<typeof setTimeout> | undefined
+
+function showControls() {
+  controlsVisible.value = true
+  clearTimeout(controlsTimer)
+  if (props.standalone && playing.value && !paused.value) {
+    controlsTimer = setTimeout(() => { controlsVisible.value = false }, 2500)
+  }
+}
 const decodedFrames = ref(0)
 const localError = ref('')
 const clientErrorCode = ref<string | null>(null)
@@ -255,6 +266,7 @@ async function togglePlayback() {
     paused.value = true
     element.pause()
     cameraAudio?.setMuted(true)
+    showControls()
     return
   }
   const token = generation
@@ -266,6 +278,7 @@ async function togglePlayback() {
   recentFrames = []
   paused.value = false
   cameraAudio?.setMuted(false)
+  showControls()
   try {
     await element.play()
   } catch {
@@ -324,6 +337,9 @@ async function release() {
   ptzAcknowledged.value = false
   controlError.value = ''
   paused.value = false
+  diagnosticsVisible.value = false
+  clearTimeout(controlsTimer)
+  controlsVisible.value = true
   gesture = null
 
   if (timer) clearTimeout(timer)
@@ -354,7 +370,9 @@ async function failed(token: number, error: string, retryable = false, code = 'V
 }
 function observed(token: number) {
   if (!current(token) || !video.value || video.value.videoWidth === 0) return
+  const firstFrame = !playing.value
   lastFrame = performance.now(); decodedFrames.value++; playing.value = true; localError.value = ''
+  if (firstFrame) showControls()
   recentFrames.push(lastFrame)
   while(recentFrames.length>2&&recentFrames[0]!<lastFrame-5000)recentFrames.shift()
   if (video.value.requestVideoFrameCallback) frame = video.value.requestVideoFrameCallback(() => observed(token))
@@ -414,7 +432,11 @@ function changeQuality(value:number) {quality.value=value;if(running.value)void 
 function selectQuality(event:Event){changeQuality(Number((event.target as HTMLSelectElement).value))}
 async function fullscreen(){try{if(props.standalone){const result=await call<boolean>('camera_player_fullscreen',{enabled:!nativeFullscreen.value});if(result.ok)nativeFullscreen.value=result.data;else localError.value=result.error.message}else if(document.fullscreenElement)await document.exitFullscreen();else await stageElement.value?.requestFullscreen()}catch{localError.value='无法进入全屏，请重试'}}
 async function toggleMini(){if(document.fullscreenElement)await document.exitFullscreen();if(nativeFullscreen.value)await fullscreen();const result=await call<boolean>('camera_player_mode',{mini:!mini.value});if(result.ok)mini.value=result.data;else localError.value=result.error.message}
-function escapeFullscreen(event:KeyboardEvent){if(event.key==='Escape'&&nativeFullscreen.value)void fullscreen()}
+function escapeFullscreen(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return
+  if (diagnosticsVisible.value) diagnosticsVisible.value = false
+  else if (nativeFullscreen.value) void fullscreen()
+}
 function waiting(){if(!paused.value && decodedFrames.value>0)playback.value.waitingEvents++}
 const visibility = () => { if (document.hidden) stop() }
 const updateWebFullscreen = () => { webFullscreen.value = document.fullscreenElement === stageElement.value }
@@ -427,13 +449,15 @@ onMounted(()=>{if(props.autoStart)void start()})
 onBeforeUnmount(() => { alive = false; generation++; document.removeEventListener('visibilitychange', visibility); document.removeEventListener('fullscreenchange', updateWebFullscreen);document.removeEventListener('keydown',escapeFullscreen); void release() })
 </script>
 <template>
-  <section class="remote-camera" :class="{ standalone, mini }">
-    <div class="remote-title">
+  <section class="remote-camera" :class="{ standalone, mini }" :aria-label="standalone ? name : undefined">
+    <div v-if="!standalone" class="remote-title">
       <h3>{{ name || '远程观看' }}</h3>
       <NTag :type="playing && !paused ? 'success' : 'default'" size="small">{{ running && !status ? '正在连接' : label }}</NTag>
     </div>
 
-    <div ref="stageElement" class="remote-stage">
+    <div ref="stageElement" class="remote-stage"
+      :class="{ 'controls-hidden': !controlsVisible && !diagnosticsVisible && !controlError && !localError }"
+      @pointermove="showControls" @pointerdown="showControls">
       <div class="camera-picture" :style="{ '--camera-ratio': pictureRatio }">
         <video v-if="status?.playbackUrl" ref="video" autoplay muted playsinline
           aria-label="米家远程摄像头画面" @waiting="waiting"></video>
@@ -447,7 +471,10 @@ onBeforeUnmount(() => { alive = false; generation++; document.removeEventListene
         >
           <span v-if="paused || (!running && playbackAvailable)" class="camera-center-icon" aria-hidden="true"><PlayOutline /></span>
           <span v-else-if="!online" class="camera-stage-status">摄像头离线</span>
-          <span v-else-if="running && !playing" class="camera-spinner" aria-hidden="true"></span>
+          <span v-else-if="running && !playing" class="camera-loading" role="status">
+            <span class="camera-spinner" aria-hidden="true"></span>
+            <span v-if="standalone">{{ label }}</span>
+          </span>
         </button>
         <span v-if="playback.width && playback.height" class="camera-resolution" :title="'实际解码分辨率'">{{ playback.width }} × {{ playback.height }}</span>
         <div class="camera-toolbar" role="group" aria-label="摄像头控制">
@@ -474,14 +501,26 @@ onBeforeUnmount(() => { alive = false; generation++; document.removeEventListene
             :title="isFullscreen ? '退出全屏' : '全屏'" @click="fullscreen">
             <ContractOutline v-if="isFullscreen" /><ExpandOutline v-else />
           </button>
-          <button v-if="!mini && (status || localError)" type="button" aria-label="复制连接结果" title="复制连接结果" @click="copy"><CopyOutline /></button>
+          <button v-if="standalone && (status || localError)" type="button" aria-label="连接结果" title="连接结果"
+            :aria-expanded="diagnosticsVisible" @click="diagnosticsVisible = !diagnosticsVisible"><EllipsisHorizontalOutline /></button>
+          <button v-if="!standalone && (status || localError)" type="button" aria-label="复制连接结果" title="复制连接结果" @click="copy"><CopyOutline /></button>
         </div>
+
+        <div v-if="standalone && (localError || controlError)" class="camera-notice" role="alert">{{ localError || controlError }}</div>
+        <section v-if="standalone && diagnosticsVisible" class="camera-diagnostics" aria-label="连接结果">
+          <div class="camera-diagnostics-header">
+            <button type="button" @click="copy"><CopyOutline />复制连接结果</button>
+            <button type="button" aria-label="关闭连接结果" title="关闭连接结果" @click="diagnosticsVisible = false"><CloseOutline /></button>
+          </div>
+          <small v-if="copied" role="status">{{ copied }}</small>
+          <pre data-remote-camera-result>{{ diagnostic }}</pre>
+        </section>
       </div>
     </div>
-    <NAlert v-if="localError" type="warning" class="remote-notice">{{ localError }}</NAlert>
-    <NAlert v-if="controlError" type="warning" class="remote-notice">{{ controlError }}</NAlert>
-    <small v-if="copied" role="status">{{ copied }}</small>
-    <details v-if="status && !mini"><summary>连接结果</summary><pre data-remote-camera-result>{{ diagnostic }}</pre></details>
+    <NAlert v-if="!standalone && localError" type="warning" class="remote-notice">{{ localError }}</NAlert>
+    <NAlert v-if="!standalone && controlError" type="warning" class="remote-notice">{{ controlError }}</NAlert>
+    <small v-if="!standalone && copied" role="status">{{ copied }}</small>
+    <details v-if="!standalone && status"><summary>连接结果</summary><pre data-remote-camera-result>{{ diagnostic }}</pre></details>
   </section>
 </template>
 
@@ -503,7 +542,8 @@ onBeforeUnmount(() => { alive = false; generation++; document.removeEventListene
   border-radius: 8px;
   overflow: hidden;
 }
-.standalone .remote-stage { height: calc(100vh - 65px); min-height: 160px; aspect-ratio: auto; }
+.standalone .remote-stage { height: 100vh; aspect-ratio: auto; border-radius: 0; }
+.camera-loading { display: grid; justify-items: center; gap: 10px; font-size: 12px; color: #d3dce7; }
 .remote-stage:fullscreen { width: 100vw; height: 100vh; aspect-ratio: auto; border-radius: 0; }
 .camera-picture {
   width: min(100%, calc(100cqh * var(--camera-ratio)));
@@ -557,6 +597,7 @@ onBeforeUnmount(() => { alive = false; generation++; document.removeEventListene
   color: white;
   font-size: 11px;
   pointer-events: none;
+  transition: opacity .2s ease;
 }
 .camera-toolbar {
   position: absolute;
@@ -568,6 +609,13 @@ onBeforeUnmount(() => { alive = false; generation++; document.removeEventListene
   padding: 8px;
   background: linear-gradient(transparent, #090c12de 55%);
   color: white;
+  transition: opacity .2s ease;
+}
+.standalone .controls-hidden .camera-toolbar:not(:hover, :has(:focus-visible)),
+.standalone .controls-hidden .camera-resolution { opacity: 0; }
+@media (hover: none) {
+  .standalone .controls-hidden .camera-toolbar:not(:hover, :has(:focus-visible)),
+  .standalone .controls-hidden .camera-resolution { opacity: 1; }
 }
 .camera-toolbar button {
   display: grid;
@@ -596,6 +644,42 @@ onBeforeUnmount(() => { alive = false; generation++; document.removeEventListene
   font: inherit;
   font-size: 12px;
 }
+.camera-notice {
+  position: absolute;
+  inset: auto 12px 58px;
+  padding: 8px 12px;
+  border: 1px solid #ffcc7c55;
+  border-radius: 7px;
+  background: #231c10ee;
+  color: #ffe0ad;
+  font-size: 12px;
+  pointer-events: none;
+}
+.camera-diagnostics {
+  position: absolute;
+  inset: 8px 8px auto auto;
+  width: min(370px, calc(100% - 16px));
+  max-height: calc(100% - 64px);
+  overflow: auto;
+  padding: 8px 12px;
+  border: 1px solid #ffffff35;
+  border-radius: 8px;
+  background: #10151ef5;
+  color: #f0f3f7;
+}
+.camera-diagnostics-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.camera-diagnostics-header button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  background: #ffffff18;
+  cursor: pointer;
+}
+.camera-diagnostics-header :deep(svg) { width: 16px; height: 16px; }
 .remote-notice { margin: 12px 0; }
 .remote-camera details { margin-top: 12px; font-size: 12px; color: #8792a5; }
 .remote-camera pre { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; font-size: 11px; }

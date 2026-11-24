@@ -18,13 +18,13 @@ onMounted(async () => {
 })
 </script>
 <template>
-  <NConfigProvider :theme="dark ? darkTheme : null"><main class="camera-window" :class="{ dark }">
+  <NConfigProvider :theme="dark ? darkTheme : null"><main class="camera-window">
     <NSpin :show="loading"><NAlert v-if="error" type="warning">{{ error }}</NAlert>
       <RemoteCameraPlayer v-if="device" :did="device.did" :online="device.online" :name="device.name" standalone auto-start />
     </NSpin>
   </main></NConfigProvider>
 </template>
 <style scoped>
-.camera-window{min-height:100vh;padding:12px;background:#f4f6fa;box-sizing:border-box}.camera-window.dark{background:#10151e;color:#d7e2f2}.camera-window :deep(.remote-camera){margin:0;border:none;background:transparent;padding:4px}
+.camera-window{min-height:100vh;background:#0b0f16;color:#d7e2f2}.camera-window :deep(.remote-camera){margin:0;padding:0;border:0;background:transparent}
 </style>
 <style>body.camera-window-body{min-width:0}</style>
