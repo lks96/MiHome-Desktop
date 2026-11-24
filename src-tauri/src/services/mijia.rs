@@ -204,15 +204,6 @@ pub struct MiProperty {
     pub value: Option<Value>,
     pub unavailable: bool,
 }
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CameraDirection {
-    Left = 1,
-    Right = 2,
-    Up = 3,
-    Down = 4,
-}
-
 #[derive(Default)]
 struct State {
     pending: Option<Pending>,
@@ -737,8 +728,8 @@ impl MiCloud {
         owner: &str,
     ) -> Result<super::camera_stream::StreamStatus, AppError> {
         use super::mijia_camera;
-        if quality > 2 {
-            return Err(AppError::invalid_input("请选择自动、流畅或高清画质"));
+        if quality > 3 {
+            return Err(AppError::invalid_input("请选择自动、流畅、高清或超清画质"));
         }
         let _operation = self.operation.lock().await;
         let auth = self.auth().await?;
@@ -771,37 +762,6 @@ impl MiCloud {
             result
         }).await
     }
-    pub async fn camera_ptz(
-        &self,
-        did: &str,
-        direction: CameraDirection,
-    ) -> Result<bool, AppError> {
-        let _operation = self.operation.lock().await;
-        let auth = self.auth().await?;
-        if !did.bytes().all(|byte| byte.is_ascii_digit())
-            || !self.state.lock().await.devices.iter().any(|device| {
-                device.did == did
-                    && device.model == super::mijia_camera::TARGET_MODEL
-                    && device.online
-            })
-        {
-            return Err(AppError::invalid_input("此摄像头当前无法使用云台控制"));
-        }
-        let result = self
-            .request(
-                &auth,
-                &format!("/home/rpc/{did}"),
-                json!({
-                    "id": 1, "method": "set_motor", "params": {"operation": direction as u8}
-                }),
-            )
-            .await?;
-        if result.as_str() == Some("ok") || result.get(0).and_then(Value::as_str) == Some("ok") {
-            return Ok(true);
-        }
-        Err(error("CAMERA_PTZ_REJECTED", "摄像头未确认云台操作", false))
-    }
-
     pub async fn set_property(
         &self,
         did: &str,

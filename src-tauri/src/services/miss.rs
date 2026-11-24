@@ -40,6 +40,45 @@ pub fn encrypted_command(key: &[u8; 32], command: u32, body: &[u8]) -> Vec<u8> {
     out.extend(&*plain);
     out
 }
+pub fn motor_reply(key: &[u8; 32], message: &[u8]) -> Option<Result<(), AppError>> {
+    fn has_command(message: &[u8], command: u32) -> bool {
+        message.starts_with(&command.to_be_bytes()) || message.starts_with(&command.to_le_bytes())
+    }
+
+    if message.len() > 2048 {
+        return None;
+    }
+    let plain;
+    let message = if has_command(message, 0x1001) {
+        plain = decrypt(key, &message[4..]).ok()?;
+        plain.as_slice()
+    } else {
+        message
+    };
+    if !has_command(message, 0x113) {
+        return None;
+    }
+    let body = &message[4..];
+    let end = body
+        .iter()
+        .rposition(|byte| *byte != 0 && !byte.is_ascii_whitespace())
+        .map_or(0, |index| index + 1);
+    let parsed = serde_json::from_slice::<serde_json::Value>(&body[..end]);
+    Some(
+        match parsed
+            .ok()
+            .and_then(|value| value.get("ret").and_then(|ret| ret.as_i64()))
+        {
+            Some(0) => Ok(()),
+            Some(_) => Err(failure("CAMERA_PTZ_REJECTED", "摄像头拒绝了云台操作")),
+            None => Err(failure(
+                "CAMERA_PTZ_UNKNOWN_REPLY",
+                "摄像头返回了云台响应，但未确认执行结果",
+            )),
+        },
+    )
+}
+
 pub fn auth_message(public: &str, sign: &str) -> Zeroizing<Vec<u8>> {
     #[derive(serde::Serialize)]
     struct Auth<'a> {
@@ -330,6 +369,28 @@ pub fn video(key: &[u8; 32], packet: &[u8]) -> Result<Option<VideoPacket>, AppEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn motor_reply_matches_only_the_motor_response_and_requires_a_result() {
+        let key = [5; 32];
+        for (reply, error) in [
+            (br#"{"ret":0}"#.as_slice(), None),
+            (br#"{"ret":1}"#.as_slice(), Some("CAMERA_PTZ_REJECTED")),
+            (
+                br#"{"position":42}"#.as_slice(),
+                Some("CAMERA_PTZ_UNKNOWN_REPLY"),
+            ),
+        ] {
+            let mut padded = reply.to_vec();
+            padded.extend([0, 0]);
+            let wire = encrypted_command(&key, 0x113, &padded);
+            assert_eq!(
+                motor_reply(&key, &wire).unwrap().err().map(|e| e.code),
+                error
+            );
+        }
+        assert!(motor_reply(&key, &encrypted_command(&key, 0x107, br#"{"ret":0}"#)).is_none());
+    }
+
     #[test]
     fn speaker_frame_preserves_alaw_payload_in_miss_envelope() {
         let samples = [0xd5; 320];

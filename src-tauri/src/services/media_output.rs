@@ -48,7 +48,7 @@ impl Drop for MediaOutput {
     }
 }
 impl MediaOutput {
-    pub async fn start(codec: u32) -> Result<Self, AppError> {
+    pub async fn start(codec: u32, quality: u8) -> Result<Self, AppError> {
         if !matches!(codec, 4 | 5) {
             return Err(failure("VIDEO_CODEC_UNSUPPORTED", "摄像头视频编码暂不支持"));
         }
@@ -85,6 +85,11 @@ impl MediaOutput {
         if codec == 4 {
             cmd.args(["-c:v", "copy"]);
         } else {
+            let bitrate = match quality {
+                3 => "9000k",
+                2 => "6000k",
+                _ => "2500k",
+            };
             #[cfg(windows)]
             cmd.args([
                 "-c:v",
@@ -92,7 +97,7 @@ impl MediaOutput {
                 "-hw_encoding",
                 "0",
                 "-b:v",
-                "2500k",
+                bitrate,
                 "-g",
                 "10",
                 "-bf",
@@ -113,7 +118,7 @@ impl MediaOutput {
                 "-tune",
                 "zerolatency",
                 "-b:v",
-                "2500k",
+                bitrate,
                 "-g",
                 "10",
                 "-bf",
@@ -409,7 +414,7 @@ mod tests {
                 .unwrap();
             assert!(sample.status.success());
             assert!(!sample.stdout.is_empty());
-            let mut out = MediaOutput::start(codec).await.unwrap();
+            let mut out = MediaOutput::start(codec, 2).await.unwrap();
             let bytes = &sample.stdout;
             let mut starts = Vec::new();
             let mut pos = 0;

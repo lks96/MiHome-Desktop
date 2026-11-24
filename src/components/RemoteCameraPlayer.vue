@@ -27,6 +27,8 @@ const talking = ref(false)
 const audioBusy = ref(false)
 const talkBusy = ref(false)
 const ptzBusy = ref(false)
+const ptzErrorCode = ref<string | null>(null)
+const ptzAcknowledged = ref(false)
 const cameraControlsReady = computed(() => running.value && status.value?.stage === 'media_ready')
 const directions = [
   { id: 'up', label: '向上', icon: '↑' },
@@ -44,7 +46,7 @@ const stageElement=ref<HTMLElement|null>(null)
 const mini=ref(false)
 const nativeFullscreen=ref(false)
 const quality=ref(2)
-const qualityOptions=[{label:'自动',value:0},{label:'流畅',value:1},{label:'高清',value:2}]
+const qualityOptions=[{label:'自动',value:0},{label:'流畅',value:1},{label:'高清',value:2},{label:'超清',value:3}]
 const playback=ref({width:0,height:0,decodedFps:null as number|null,droppedFrames:0,waitingEvents:0,bufferedAheadSeconds:0,hlsLatencySeconds:null as number|null})
 let recentFrames:number[]=[]
 const labels: Record<string, string> = { provisioning: '正在获取视频授权', rendezvous: '正在连接会合服务', relay_candidate: '正在选择远程节点', relay_request: '正在等待摄像头加入', relay_ready: '远程节点已就绪', session_linking: '正在连接摄像头会话', session_established: '远程会话已建立', miss_authenticating: '正在验证视频权限', miss_authenticated: '视频权限已确认', waiting_media: '正在等待视频', preparing_video: '正在处理视频', media_ready: '正在等待画面', failed: '连接失败', stopped: '已停止' }
@@ -53,7 +55,8 @@ const diagnostic = computed(() => {
   const a = status.value?.authDiagnostics
   const t = status.value?.transportDiagnostics
   const timing=status.value?.timingDiagnostics
-  return JSON.stringify({ diagnosticSchema: 4, clientVersion, model: 'chuangmi.camera.039a01', transport: 'cs2', stage: status.value?.stage ?? 'idle', failedStage: status.value?.failedStage ?? null, errorCode: status.value?.error?.code ?? clientErrorCode.value, elapsedMs: status.value?.elapsedMs ?? 0, mediaPackets: status.value?.mediaPackets ?? 0, keyframes: status.value?.keyframes ?? 0, codec: status.value?.codec ?? null, decodedFrames: decodedFrames.value, remotePlaybackVerified: decodedFrames.value > 0,requestedQuality:status.value?.requestedQuality??quality.value,
+  return JSON.stringify({ diagnosticSchema: 5, clientVersion, model: 'chuangmi.camera.039a01', transport: 'cs2', stage: status.value?.stage ?? 'idle', failedStage: status.value?.failedStage ?? null, errorCode: status.value?.error?.code ?? clientErrorCode.value, elapsedMs: status.value?.elapsedMs ?? 0, mediaPackets: status.value?.mediaPackets ?? 0, keyframes: status.value?.keyframes ?? 0, codec: status.value?.codec ?? null, decodedFrames: decodedFrames.value, remotePlaybackVerified: decodedFrames.value > 0,requestedQuality:status.value?.requestedQuality??quality.value,
+    ptzDiagnostics: { acknowledged: ptzAcknowledged.value, errorCode: ptzErrorCode.value },
     authDiagnostics: a ? { messages: a.messages, messageKind: a.messageKind, commandByteOrder: a.commandByteOrder, bodyBytes: a.bodyBytes, trailingPaddingBytes: a.trailingPaddingBytes, encrypted: a.encrypted, jsonShape: a.jsonShape, jsonErrorCategory: a.jsonErrorCategory } : null,
     transportDiagnostics: t ? { linkRequests: t.linkRequests, linkNonRequests: t.linkNonRequests, commandMessages: t.commandMessages, mediaMessages: t.mediaMessages, streamErrorChannel: t.streamErrorChannel } : null,
     timingDiagnostics:timing?{timestampSamples:timing.timestampSamples,timestampFallbacks:timing.timestampFallbacks,sourceFps:timing.sourceFps,receiveFps:timing.receiveFps,largestArrivalGapMs:timing.largestArrivalGapMs,encoderWriteMaxMs:timing.encoderWriteMaxMs}:null,
@@ -218,10 +221,17 @@ async function moveCamera(direction: string) {
   if (!sessionId || ptzBusy.value) return
   ptzBusy.value = true
   controlError.value = ''
+  ptzErrorCode.value = null
+  ptzAcknowledged.value = false
   const result = await call<boolean>('camera_remote_ptz', { sessionId, direction })
   if (id !== sessionId) return
   ptzBusy.value = false
-  if (!result.ok) controlError.value = result.error.message
+  if (result.ok) {
+    ptzAcknowledged.value = result.data
+  } else {
+    ptzErrorCode.value = result.error.code
+    controlError.value = result.error.message
+  }
 }
 
 async function release() {
@@ -230,6 +240,8 @@ async function release() {
   audioBusy.value = false
   talkBusy.value = false
   ptzBusy.value = false
+  ptzErrorCode.value = null
+  ptzAcknowledged.value = false
   controlError.value = ''
 
   if (timer) clearTimeout(timer)
@@ -334,7 +346,10 @@ onBeforeUnmount(() => { alive = false; generation++; document.removeEventListene
   <section class="remote-camera" :class="{standalone,mini}">
     <div class="remote-title"><h3>{{ name || '远程观看' }}</h3><NTag :type="playing ? 'success' : 'default'" size="small">{{ running && !status ? '正在连接' : label }}</NTag></div>
     <p v-if="!mini&&!standalone">直接连接摄像头</p>
-    <div v-if="!mini" class="quality-control"><label>画质 <select aria-label="视频画质" :value="quality" @change="selectQuality"><option v-for="option in qualityOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label></div>
+    <div v-if="!mini" class="quality-control">
+      <label>画质 <select aria-label="视频画质" :value="quality" @change="selectQuality"><option v-for="option in qualityOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
+      <span v-if="playback.width && playback.height">实际分辨率 {{ playback.width }} × {{ playback.height }}</span>
+    </div>
     <div v-if="status?.playbackUrl" ref="stageElement" class="remote-stage"><video ref="video" autoplay muted playsinline aria-label="米家远程摄像头画面" @waiting="waiting"></video><p v-if="!playing">等待画面解码…</p></div>
     <NAlert v-if="localError" type="warning" class="remote-notice">{{ localError }}</NAlert>
     <div class="remote-actions"><NButton v-if="!mini" type="primary" :disabled="!online || running || (!standalone&&!desktop.visible)" @click="start()">远程播放</NButton><NButton :disabled="!running" @click="stop">停止播放</NButton><NButton v-if="status?.playbackUrl" @click="fullscreen">{{ nativeFullscreen?'退出全屏':'全屏' }}</NButton><NButton v-if="standalone" @click="toggleMini">{{ mini?'退出小窗':'小窗模式' }}</NButton><NButton v-if="!mini&&(status || localError)" @click="copy">复制连接结果</NButton></div>

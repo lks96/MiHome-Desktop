@@ -163,5 +163,5 @@ jobs:
           sha256sum MiHome-Desktop-Windows-x64-setup.exe > Windows-Installer-SHA256SUMS.txt
           gh release create "$GITHUB_REF_NAME" \
             --verify-tag --prerelease --title "$GITHUB_REF_NAME Windows x64" \
-            --notes '修复旧数据库因迁移脚本换行差异而无法启动的问题。保留现有数据库和配置，可直接覆盖安装。安装包未签名。' \
+            --notes '云台改由当前观看会话发送。新增超清，提高清晰档位的转码目标码率，并显示实际分辨率。云台和超清仍需摄像头实测。安装包未签名。' \
             MiHome-Desktop-Windows-x64-setup.exe Windows-Installer-SHA256SUMS.txt

@@ -284,7 +284,7 @@ test('auth diagnostics expose only structure and deterministic parse failures do
   await expect(page.getByText('摄像头认证响应格式暂不兼容，请复制连接结果',{exact:true})).toBeVisible()
   await page.getByText('连接结果',{exact:true}).click()
   const report=page.locator('[data-remote-camera-result]')
-  await expect(report).toContainText('"diagnosticSchema": 4')
+  await expect(report).toContainText('"diagnosticSchema": 5')
   await expect(report).toContainText(`"clientVersion": "${clientVersion}"`)
   await expect(report).toContainText('"commandByteOrder": "le"')
   await expect(report).toContainText('"linkNonRequests": 1')
@@ -316,11 +316,11 @@ test('standalone viewer autoplays and switches floating size without restarting 
   expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStops)).toEqual([])
 })
 
-test('quality selection keeps HD as default and restarts once with fluent quality', async ({ page }) => {
+test('quality selection keeps HD as default and requests full quality from the camera', async ({ page }) => {
   await mijiaFixture(page);await page.goto('/?cameraPlayer=1')
   await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteQualities)).toEqual([2])
-  await page.getByRole('combobox',{name:'视频画质'}).selectOption('1')
-  await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteQualities)).toEqual([2,1])
+  await page.getByRole('combobox',{name:'视频画质'}).selectOption('3')
+  await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.remoteQualities)).toEqual([2,3])
   expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStops)).toEqual(['test-session'])
 })
 

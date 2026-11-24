@@ -44,8 +44,22 @@ pub enum MediaControl {
     TalkOff,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraDirection {
+    Left = 1,
+    Right = 2,
+    Up = 3,
+    Down = 4,
+}
+
+pub enum ControlAction {
+    Media(MediaControl),
+    Move(CameraDirection),
+}
+
 struct ControlRequest {
-    action: MediaControl,
+    action: ControlAction,
     reply: oneshot::Sender<Result<(), AppError>>,
 }
 
@@ -84,8 +98,8 @@ impl CameraStreams {
     where
         F: Future<Output = Result<RemoteGrant, AppError>> + Send + 'static,
     {
-        if quality > 2 {
-            return Err(AppError::invalid_input("请选择自动、流畅或高清画质"));
+        if quality > 3 {
+            return Err(AppError::invalid_input("请选择自动、流畅、高清或超清画质"));
         }
         let mut entries = self.entries.lock().await;
         // Reap finished tasks before deciding the resource budget.
@@ -205,7 +219,7 @@ impl CameraStreams {
         &self,
         id: &str,
         owner: &str,
-        action: MediaControl,
+        action: ControlAction,
     ) -> Result<bool, AppError> {
         let controls = {
             let entries = self.entries.lock().await;
@@ -218,11 +232,15 @@ impl CameraStreams {
             }
             entry.controls.clone()
         };
+        let timeout = match action {
+            ControlAction::Media(_) => 3,
+            ControlAction::Move(_) => 6,
+        };
         let (reply, result) = oneshot::channel();
         controls
             .try_send(ControlRequest { action, reply })
             .map_err(|_| failure("CAMERA_CONTROL_BUSY", "摄像头控制暂时繁忙，请重试"))?;
-        tokio::time::timeout(Duration::from_secs(3), result)
+        tokio::time::timeout(Duration::from_secs(timeout), result)
             .await
             .map_err(|_| failure("CAMERA_CONTROL_TIMEOUT", "摄像头控制超时"))?
             .map_err(|_| session_gone())??;
@@ -251,15 +269,6 @@ impl CameraStreams {
             .speaker
             .try_send(zeroize::Zeroizing::new(samples))
             .is_ok())
-    }
-
-    pub async fn device(&self, id: &str, owner: &str) -> Result<String, AppError> {
-        let entries = self.entries.lock().await;
-        entries
-            .get(id)
-            .filter(|entry| entry.owner == owner && !entry.task.is_finished())
-            .map(|entry| entry.did.clone())
-            .ok_or_else(session_gone)
     }
 
     pub async fn stop(&self, id: &str) {
@@ -348,6 +357,11 @@ struct MediaControls {
     audio: AudioQueue,
 }
 
+struct PendingMove {
+    deadline: tokio::time::Instant,
+    reply: oneshot::Sender<Result<(), AppError>>,
+}
+
 async fn run<F>(
     provision: F,
     status: &Arc<Mutex<StreamStatus>>,
@@ -412,6 +426,7 @@ where
     let mut headers = zeroize::Zeroizing::new(Vec::new());
     let mut listening = false;
     let mut speaker_ready_at = None;
+    let mut pending_move: Option<PendingMove> = None;
     loop {
         let deadline = tokio::time::Instant::from_std(received + Duration::from_secs(20));
         let message = tokio::select! {
@@ -422,7 +437,29 @@ where
                 if request.reply.is_closed() {
                     continue;
                 }
-                let command = match request.action {
+                let action = match request.action {
+                    ControlAction::Move(direction) => {
+                        if pending_move.is_some() {
+                            let _ = request.reply.send(Err(failure("CAMERA_PTZ_BUSY", "正在等待上一条云台操作响应")));
+                        } else {
+                            let body = format!(r#"{{"operation":{}}}"#, direction as u8);
+                            let wire = miss::encrypted_command(&grant.key, 0x112, body.as_bytes());
+                            match tokio::time::timeout(Duration::from_secs(2), conn.command(&wire)).await {
+                                Ok(Ok(())) => pending_move = Some(PendingMove {
+                                    deadline: tokio::time::Instant::now() + Duration::from_secs(3),
+                                    reply: request.reply,
+                                }),
+                                Ok(Err(error)) => { let _ = request.reply.send(Err(error)); }
+                                Err(_) => {
+                                    let _ = request.reply.send(Err(failure("CAMERA_PTZ_SEND_TIMEOUT", "发送云台操作超时")));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    ControlAction::Media(action) => action,
+                };
+                let command = match action {
                     MediaControl::ListenOn => 0x104,
                     MediaControl::ListenOff => 0x105,
                     MediaControl::TalkOn => 0x106,
@@ -432,7 +469,7 @@ where
                 let result = tokio::time::timeout(Duration::from_secs(2), conn.command(&wire))
                     .await.unwrap_or_else(|_| Err(failure("CAMERA_CONTROL_TIMEOUT", "摄像头控制超时")));
                 if result.is_ok() {
-                    match request.action {
+                    match action {
                         MediaControl::ListenOn => listening = true,
                         MediaControl::ListenOff => {
                             listening = false;
@@ -457,9 +494,27 @@ where
                 }
                 continue;
             }
+            _ = async {
+                match &pending_move {
+                    Some(pending) => tokio::time::sleep_until(pending.deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if let Some(pending) = pending_move.take() {
+                    let _ = pending.reply.send(Err(failure("CAMERA_PTZ_NO_REPLY", "摄像头未返回云台响应，请先查看画面是否已移动")));
+                }
+                continue;
+            }
             message = conn.next() => message?,
         };
         status.lock().unwrap().transport_diagnostics = Some(conn.diagnostics());
+        if message.channel == 0 && pending_move.is_some() {
+            if let Some(result) = miss::motor_reply(&grant.key, &message.bytes) {
+                if let Some(pending) = pending_move.take() {
+                    let _ = pending.reply.send(result);
+                }
+            }
+        }
         if message.channel != 2 {
             continue;
         }
@@ -509,7 +564,7 @@ where
         codec = Some(video.codec);
         if pipeline.is_none() {
             status.lock().unwrap().stage = "preparing_video";
-            *pipeline = Some(MediaOutput::start(video.codec).await?);
+            *pipeline = Some(MediaOutput::start(video.codec, quality).await?);
         }
         let output = pipeline.as_mut().unwrap();
         if !headers.is_empty() {

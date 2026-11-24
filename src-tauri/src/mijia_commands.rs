@@ -75,7 +75,11 @@ pub async fn camera_remote_control(
 ) -> Result<ApiResult<bool>, ()> {
     Ok(service
         .cameras
-        .control(&session_id, window.label(), action)
+        .control(
+            &session_id,
+            window.label(),
+            crate::services::camera_stream::ControlAction::Media(action),
+        )
         .await
         .into())
 }
@@ -112,14 +116,14 @@ pub async fn camera_remote_ptz(
     service: tauri::State<'_, MiCloud>,
     window: tauri::WebviewWindow,
     session_id: String,
-    direction: crate::services::mijia::CameraDirection,
+    direction: crate::services::camera_stream::CameraDirection,
 ) -> Result<ApiResult<bool>, ()> {
-    let result = async {
-        let did = service.cameras.device(&session_id, window.label()).await?;
-        service.camera_ptz(&did, direction).await
-    }
-    .await;
-    Ok(result.into())
+    use crate::services::camera_stream::ControlAction;
+    Ok(service
+        .cameras
+        .control(&session_id, window.label(), ControlAction::Move(direction))
+        .await
+        .into())
 }
 
 #[tauri::command]
