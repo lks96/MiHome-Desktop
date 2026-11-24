@@ -23,7 +23,16 @@ export class CameraAudio {
   private nextTime = 0
   private timestamp = 0
 
-  constructor(private context: AudioContext, private onError: () => void) {}
+  private output: GainNode
+
+  constructor(private context: AudioContext, private onError: () => void) {
+    this.output = context.createGain()
+    this.output.connect(context.destination)
+  }
+
+  setMuted(muted: boolean) {
+    this.output.gain.value = muted ? 0 : 1
+  }
 
   play(packet: CameraAudioPacket) {
     const { codec, sampleRate, bytes } = packet
@@ -73,7 +82,7 @@ export class CameraAudio {
     if (this.nextTime < now) this.nextTime = now + 0.08
     const source = this.context.createBufferSource()
     source.buffer = buffer
-    source.connect(this.context.destination)
+    source.connect(this.output)
     source.onended = () => source.disconnect()
     source.start(this.nextTime)
     this.nextTime += buffer.duration

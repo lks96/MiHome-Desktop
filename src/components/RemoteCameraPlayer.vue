@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Hls from 'hls.js'
-import { NAlert, NButton, NTag } from 'naive-ui'
+import { NAlert, NTag } from 'naive-ui'
+import { BrowsersOutline, ContractOutline, CopyOutline, ExpandOutline, MicOffOutline, MicOutline, PauseOutline, PlayOutline, StopOutline, VolumeHighOutline, VolumeMuteOutline } from '@vicons/ionicons5'
 import { call } from '../utils/ipc'
 import { CameraAudio, type CameraAudioPacket } from '../utils/camera-audio'
 import microphoneWorklet from '../utils/camera-mic.worklet.js?url&no-inline'
@@ -18,6 +19,7 @@ const status = ref<Status | null>(null)
 const video = ref<HTMLVideoElement | null>(null)
 const running = ref(false)
 const playing = ref(false)
+const paused = ref(false)
 const decodedFrames = ref(0)
 const localError = ref('')
 const clientErrorCode = ref<string | null>(null)
@@ -30,12 +32,13 @@ const ptzBusy = ref(false)
 const ptzErrorCode = ref<string | null>(null)
 const ptzAcknowledged = ref(false)
 const cameraControlsReady = computed(() => running.value && status.value?.stage === 'media_ready')
-const directions = [
-  { id: 'up', label: '向上', icon: '↑' },
-  { id: 'left', label: '向左', icon: '←' },
-  { id: 'down', label: '向下', icon: '↓' },
-  { id: 'right', label: '向右', icon: '→' },
-]
+const keyboardDirections: Record<string, string> = {
+  ArrowUp: 'up',
+  ArrowLeft: 'left',
+  ArrowDown: 'down',
+  ArrowRight: 'right',
+}
+let gesture: { id: number; x: number; y: number; moved: boolean } | null = null
 let cameraAudio: CameraAudio | null = null
 let audioTimer: ReturnType<typeof setTimeout> | undefined
 let micStream: MediaStream | null = null
@@ -45,12 +48,17 @@ const copied = ref('')
 const stageElement=ref<HTMLElement|null>(null)
 const mini=ref(false)
 const nativeFullscreen=ref(false)
+const webFullscreen = ref(false)
+const isFullscreen = computed(() => nativeFullscreen.value || webFullscreen.value)
 const quality=ref(2)
 const qualityOptions=[{label:'自动',value:0},{label:'流畅',value:1},{label:'高清',value:2},{label:'超清',value:3}]
 const playback=ref({width:0,height:0,decodedFps:null as number|null,droppedFrames:0,waitingEvents:0,bufferedAheadSeconds:0,hlsLatencySeconds:null as number|null})
 let recentFrames:number[]=[]
 const labels: Record<string, string> = { provisioning: '正在获取视频授权', rendezvous: '正在连接会合服务', relay_candidate: '正在选择远程节点', relay_request: '正在等待摄像头加入', relay_ready: '远程节点已就绪', session_linking: '正在连接摄像头会话', session_established: '远程会话已建立', miss_authenticating: '正在验证视频权限', miss_authenticated: '视频权限已确认', waiting_media: '正在等待视频', preparing_video: '正在处理视频', media_ready: '正在等待画面', failed: '连接失败', stopped: '已停止' }
-const label = computed(() => playing.value ? '正在播放' : status.value ? labels[status.value.stage] ?? '正在连接' : '尚未播放')
+const pictureRatio = computed(() => playback.value.height ? playback.value.width / playback.value.height : 16 / 9)
+const playbackAction = computed(() => paused.value ? '继续播放' : playing.value ? '暂停播放' : '远程播放')
+const playbackAvailable = computed(() => playing.value || (!running.value && props.online && (props.standalone || desktop.visible)))
+const label = computed(() => paused.value ? '已暂停' : playing.value ? '正在播放' : status.value ? labels[status.value.stage] ?? '正在连接' : '尚未播放')
 const diagnostic = computed(() => {
   const a = status.value?.authDiagnostics
   const t = status.value?.transportDiagnostics
@@ -101,7 +109,7 @@ async function pollAudio(sessionId: string, player: CameraAudio) {
     return
   }
   try {
-    for (const packet of result.data) player.play(packet)
+    if (!paused.value) for (const packet of result.data) player.play(packet)
   } catch {
     closeAudio()
     controlError.value = '当前 WebView2 无法解码摄像头声音'
@@ -127,6 +135,7 @@ async function toggleAudio() {
         void call('camera_remote_control', { sessionId, action: 'listen_off' })
       })
       const player = cameraAudio
+      player.setMuted(paused.value)
       await context.resume()
       if (id !== sessionId || player !== cameraAudio) return
     } else {
@@ -218,7 +227,7 @@ async function toggleTalk() {
 
 async function moveCamera(direction: string) {
   const sessionId = id
-  if (!sessionId || ptzBusy.value) return
+  if (!sessionId || !cameraControlsReady.value || ptzBusy.value) return
   ptzBusy.value = true
   controlError.value = ''
   ptzErrorCode.value = null
@@ -234,6 +243,77 @@ async function moveCamera(direction: string) {
   }
 }
 
+async function togglePlayback() {
+  if (!playbackAvailable.value) return
+  if (!running.value) {
+    await start()
+    return
+  }
+  const element = video.value
+  if (!element) return
+  if (!paused.value) {
+    paused.value = true
+    element.pause()
+    cameraAudio?.setMuted(true)
+    return
+  }
+  const token = generation
+  const livePosition = hls?.liveSyncPosition
+  if (livePosition != null && element.seekable.length && livePosition >= element.seekable.start(0)) {
+    element.currentTime = Math.min(livePosition, element.seekable.end(element.seekable.length - 1))
+  }
+  lastFrame = performance.now()
+  recentFrames = []
+  paused.value = false
+  cameraAudio?.setMuted(false)
+  try {
+    await element.play()
+  } catch {
+    if (!paused.value && current(token)) await failed(token, '无法继续播放，请重新连接。')
+  }
+}
+
+function beginGesture(event: PointerEvent) {
+  if (!event.isPrimary || event.button !== 0) return
+  gesture = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false }
+  const surface = event.currentTarget as HTMLElement
+  surface.setPointerCapture(event.pointerId)
+}
+
+function updateGesture(event: PointerEvent) {
+  if (gesture?.id !== event.pointerId) return
+  const distance = Math.max(Math.abs(event.clientX - gesture.x), Math.abs(event.clientY - gesture.y))
+  if (distance >= 28) gesture.moved = true
+}
+
+function endGesture(event: PointerEvent) {
+  if (gesture?.id !== event.pointerId) return
+  updateGesture(event)
+  const { x, y, moved } = gesture
+  gesture = null
+  const dx = event.clientX - x
+  const dy = event.clientY - y
+  if (Math.max(Math.abs(dx), Math.abs(dy)) >= 28) {
+    const direction = Math.abs(dx) >= Math.abs(dy)
+      ? (dx < 0 ? 'left' : 'right')
+      : (dy < 0 ? 'up' : 'down')
+    void moveCamera(direction)
+  } else if (!moved) {
+    void togglePlayback()
+  }
+}
+
+function cancelGesture(event: PointerEvent) {
+  if (gesture?.id === event.pointerId) gesture = null
+}
+
+function cameraKey(event: KeyboardEvent) {
+  const direction = keyboardDirections[event.key]
+  if (!direction) return
+  event.preventDefault()
+  if (!event.repeat) void moveCamera(direction)
+}
+
 async function release() {
   closeAudio()
   closeMicrophone()
@@ -243,6 +323,8 @@ async function release() {
   ptzErrorCode.value = null
   ptzAcknowledged.value = false
   controlError.value = ''
+  paused.value = false
+  gesture = null
 
   if (timer) clearTimeout(timer)
   if (watchdog) clearInterval(watchdog)
@@ -293,7 +375,7 @@ async function attach(token: number, url: string) {
   if (element.requestVideoFrameCallback) frame = element.requestVideoFrameCallback(() => observed(token))
   let previousTime = -1
   watchdog = setInterval(() => {
-    if (!current(token)) return
+    if (!current(token) || paused.value) return
     if (!element.requestVideoFrameCallback && element.readyState >= 2 && element.videoWidth > 0 && previousTime !== element.currentTime) { previousTime = element.currentTime; observed(token) }
     let buffered=0
     for(let i=0;i<element.buffered.length;i++)if(element.buffered.start(i)<=element.currentTime&&element.buffered.end(i)>=element.currentTime)buffered=element.buffered.end(i)-element.currentTime
@@ -333,48 +415,189 @@ function selectQuality(event:Event){changeQuality(Number((event.target as HTMLSe
 async function fullscreen(){try{if(props.standalone){const result=await call<boolean>('camera_player_fullscreen',{enabled:!nativeFullscreen.value});if(result.ok)nativeFullscreen.value=result.data;else localError.value=result.error.message}else if(document.fullscreenElement)await document.exitFullscreen();else await stageElement.value?.requestFullscreen()}catch{localError.value='无法进入全屏，请重试'}}
 async function toggleMini(){if(document.fullscreenElement)await document.exitFullscreen();if(nativeFullscreen.value)await fullscreen();const result=await call<boolean>('camera_player_mode',{mini:!mini.value});if(result.ok)mini.value=result.data;else localError.value=result.error.message}
 function escapeFullscreen(event:KeyboardEvent){if(event.key==='Escape'&&nativeFullscreen.value)void fullscreen()}
-function waiting(){if(decodedFrames.value>0)playback.value.waitingEvents++}
+function waiting(){if(!paused.value && decodedFrames.value>0)playback.value.waitingEvents++}
 const visibility = () => { if (document.hidden) stop() }
+const updateWebFullscreen = () => { webFullscreen.value = document.fullscreenElement === stageElement.value }
+document.addEventListener('fullscreenchange', updateWebFullscreen)
 document.addEventListener('visibilitychange', visibility)
 document.addEventListener('keydown',escapeFullscreen)
 watch(() => [props.did, props.online], stop)
 watch(() => desktop.visible, visible => { if (!props.standalone&&!visible) stop() })
 onMounted(()=>{if(props.autoStart)void start()})
-onBeforeUnmount(() => { alive = false; generation++; document.removeEventListener('visibilitychange', visibility);document.removeEventListener('keydown',escapeFullscreen); void release() })
+onBeforeUnmount(() => { alive = false; generation++; document.removeEventListener('visibilitychange', visibility); document.removeEventListener('fullscreenchange', updateWebFullscreen);document.removeEventListener('keydown',escapeFullscreen); void release() })
 </script>
 <template>
-  <section class="remote-camera" :class="{standalone,mini}">
-    <div class="remote-title"><h3>{{ name || '远程观看' }}</h3><NTag :type="playing ? 'success' : 'default'" size="small">{{ running && !status ? '正在连接' : label }}</NTag></div>
-    <p v-if="!mini&&!standalone">直接连接摄像头</p>
-    <div v-if="!mini" class="quality-control">
-      <label>画质 <select aria-label="视频画质" :value="quality" @change="selectQuality"><option v-for="option in qualityOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
-      <span v-if="playback.width && playback.height">实际分辨率 {{ playback.width }} × {{ playback.height }}</span>
+  <section class="remote-camera" :class="{ standalone, mini }">
+    <div class="remote-title">
+      <h3>{{ name || '远程观看' }}</h3>
+      <NTag :type="playing && !paused ? 'success' : 'default'" size="small">{{ running && !status ? '正在连接' : label }}</NTag>
     </div>
-    <div v-if="status?.playbackUrl" ref="stageElement" class="remote-stage"><video ref="video" autoplay muted playsinline aria-label="米家远程摄像头画面" @waiting="waiting"></video><p v-if="!playing">等待画面解码…</p></div>
-    <NAlert v-if="localError" type="warning" class="remote-notice">{{ localError }}</NAlert>
-    <div class="remote-actions"><NButton v-if="!mini" type="primary" :disabled="!online || running || (!standalone&&!desktop.visible)" @click="start()">远程播放</NButton><NButton :disabled="!running" @click="stop">停止播放</NButton><NButton v-if="status?.playbackUrl" @click="fullscreen">{{ nativeFullscreen?'退出全屏':'全屏' }}</NButton><NButton v-if="standalone" @click="toggleMini">{{ mini?'退出小窗':'小窗模式' }}</NButton><NButton v-if="!mini&&(status || localError)" @click="copy">复制连接结果</NButton></div>
-    <div class="remote-actions camera-controls" aria-label="摄像头控制">
-      <NButton size="small" :disabled="!cameraControlsReady || audioBusy" :aria-pressed="listening" @click="toggleAudio">现场声音{{ listening ? '开' : '关' }}</NButton>
-      <NButton size="small" :disabled="!cameraControlsReady || talkBusy" :aria-pressed="talking" @click="toggleTalk">麦克风对讲{{ talking ? '开' : '关' }}</NButton>
-      <div class="ptz-controls" role="group" aria-label="云台方向">
-        <NButton v-for="direction in directions" :key="direction.id" size="small" :disabled="!cameraControlsReady || ptzBusy" :aria-label="direction.label" :title="direction.label" @click="moveCamera(direction.id)">{{ direction.icon }}</NButton>
+
+    <div ref="stageElement" class="remote-stage">
+      <div class="camera-picture" :style="{ '--camera-ratio': pictureRatio }">
+        <video v-if="status?.playbackUrl" ref="video" autoplay muted playsinline
+          aria-label="米家远程摄像头画面" @waiting="waiting"></video>
+        <button
+          type="button" class="camera-surface" aria-label="视频画面"
+          :title="playing ? '点击暂停或播放，按住拖动控制云台' : playbackAction"
+          :aria-disabled="!playbackAvailable && !cameraControlsReady"
+          @pointerdown="beginGesture" @pointermove="updateGesture" @pointerup="endGesture"
+          @pointercancel="cancelGesture" @lostpointercapture="cancelGesture"
+          @keydown="cameraKey" @click="event => { if (event.detail === 0) void togglePlayback() }"
+        >
+          <span v-if="paused || (!running && playbackAvailable)" class="camera-center-icon" aria-hidden="true"><PlayOutline /></span>
+          <span v-else-if="!online" class="camera-stage-status">摄像头离线</span>
+          <span v-else-if="running && !playing" class="camera-spinner" aria-hidden="true"></span>
+        </button>
+        <span v-if="playback.width && playback.height" class="camera-resolution" :title="'实际解码分辨率'">{{ playback.width }} × {{ playback.height }}</span>
+        <div class="camera-toolbar" role="group" aria-label="摄像头控制">
+          <button type="button" :aria-label="playbackAction" :title="playbackAction" :disabled="!playbackAvailable" @click="togglePlayback">
+            <PauseOutline v-if="playing && !paused" /><PlayOutline v-else />
+          </button>
+          <button type="button" aria-label="停止播放" title="停止播放" :disabled="!running" @click="stop"><StopOutline /></button>
+          <button type="button" :aria-label="listening ? '现场声音开' : '现场声音关'"
+            :title="listening ? '关闭现场声音' : '开启现场声音'"
+            :disabled="!cameraControlsReady || audioBusy" :aria-pressed="listening" @click="toggleAudio">
+            <VolumeHighOutline v-if="listening" /><VolumeMuteOutline v-else />
+          </button>
+          <button type="button" :aria-label="talking ? '麦克风对讲开' : '麦克风对讲关'"
+            :title="talking ? '关闭麦克风对讲' : '开启麦克风对讲'"
+            :disabled="!cameraControlsReady || talkBusy" :aria-pressed="talking" @click="toggleTalk">
+            <MicOutline v-if="talking" /><MicOffOutline v-else />
+          </button>
+          <select aria-label="视频画质" title="视频画质" :value="quality" @change="selectQuality">
+            <option v-for="option in qualityOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+          </select>
+          <button v-if="standalone" type="button" :aria-label="mini ? '退出小窗' : '小窗模式'"
+            :title="mini ? '退出小窗' : '小窗模式'" :aria-pressed="mini" @click="toggleMini"><BrowsersOutline /></button>
+          <button v-if="status?.playbackUrl" type="button" :aria-label="isFullscreen ? '退出全屏' : '全屏'"
+            :title="isFullscreen ? '退出全屏' : '全屏'" @click="fullscreen">
+            <ContractOutline v-if="isFullscreen" /><ExpandOutline v-else />
+          </button>
+          <button v-if="!mini && (status || localError)" type="button" aria-label="复制连接结果" title="复制连接结果" @click="copy"><CopyOutline /></button>
+        </div>
       </div>
     </div>
+    <NAlert v-if="localError" type="warning" class="remote-notice">{{ localError }}</NAlert>
     <NAlert v-if="controlError" type="warning" class="remote-notice">{{ controlError }}</NAlert>
     <small v-if="copied" role="status">{{ copied }}</small>
-    <details v-if="status&&!mini"><summary>连接结果</summary><pre data-remote-camera-result>{{ diagnostic }}</pre></details>
+    <details v-if="status && !mini"><summary>连接结果</summary><pre data-remote-camera-result>{{ diagnostic }}</pre></details>
   </section>
 </template>
-<style scoped>
-.remote-camera{margin:20px 0;padding:16px;border:1px solid #8792a533;border-radius:12px}.remote-title{display:flex;align-items:center;justify-content:space-between}.remote-title h3{margin:0;font-size:15px}.remote-camera>p,.remote-camera small{font-size:12px;color:#8792a5;line-height:1.8}.remote-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.remote-stage{position:relative;aspect-ratio:16/9;background:#10151e;border-radius:8px;overflow:hidden}.remote-stage video{width:100%;height:100%;object-fit:contain}.remote-stage>p{position:absolute;bottom:8px;left:12px;color:white;font-size:12px}.remote-notice{margin:12px 0}.remote-camera details{margin-top:14px;font-size:12px;color:#8792a5}.remote-camera pre{white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font-size:11px}.remote-camera small{display:block;margin-top:8px}
-</style>
-<style scoped>
-.quality-control{display:flex;align-items:center;gap:12px;margin:12px 0;font-size:12px;color:#8792a5}.quality-control .n-select{width:140px}.standalone .remote-stage{height:calc(100vh - 208px);min-height:160px;aspect-ratio:auto}.mini .remote-stage{height:calc(100vh - 96px);min-height:120px}.remote-stage:fullscreen{width:100vw;height:100vh;aspect-ratio:auto;border-radius:0}.mini .remote-actions{margin-top:6px}.remote-title h3{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:12px}
-</style>
-<style scoped>.quality-control select{width:130px;margin-left:12px;padding:7px 10px;border:1px solid #8792a555;border-radius:6px;background:transparent;color:inherit;font:inherit}.quality-control option{background:white;color:#172238}</style>
 
 <style scoped>
-.camera-controls,.ptz-controls{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.standalone .remote-stage{height:calc(100vh - 244px)}
-.mini .remote-stage{height:calc(100vh - 129px)}
+.remote-camera {
+  margin: 20px 0;
+  padding: 16px;
+  border: 1px solid #8792a533;
+  border-radius: 12px;
+}
+.remote-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.remote-title h3 { margin: 0 12px 0 0; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-stage {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 9;
+  container-type: size;
+  background: #0b0f16;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.standalone .remote-stage { height: calc(100vh - 65px); min-height: 160px; aspect-ratio: auto; }
+.remote-stage:fullscreen { width: 100vw; height: 100vh; aspect-ratio: auto; border-radius: 0; }
+.camera-picture {
+  width: min(100%, calc(100cqh * var(--camera-ratio)));
+  aspect-ratio: var(--camera-ratio);
+  position: relative;
+  isolation: isolate;
+}
+.camera-picture video { display: block; width: 100%; height: 100%; object-fit: contain; }
+.camera-surface {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: white;
+  border: 0;
+  background: transparent;
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+.camera-surface:active { cursor: grabbing; }
+.camera-surface:focus-visible { outline: 2px solid #85e1c1; outline-offset: -2px; }
+.camera-center-icon {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #ffffff40;
+  background: #0b0f16bb;
+  border-radius: 50%;
+}
+.camera-center-icon :deep(svg) { width: 24px; height: 24px; }
+.camera-stage-status { color: #d3dce7; font-size: 13px; }
+.camera-spinner {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid #ffffff36;
+  border-top-color: white;
+  animation: camera-loading .8s linear infinite;
+}
+@keyframes camera-loading { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .camera-spinner { animation: none; } }
+.camera-resolution {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  padding: 4px 7px;
+  border-radius: 5px;
+  background: #0b0f16ca;
+  color: white;
+  font-size: 11px;
+  pointer-events: none;
+}
+.camera-toolbar {
+  position: absolute;
+  inset: auto 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  padding: 8px;
+  background: linear-gradient(transparent, #090c12de 55%);
+  color: white;
+}
+.camera-toolbar button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.camera-toolbar button :deep(svg) { width: 20px; height: 20px; }
+.camera-toolbar button:not(:disabled):hover { background: #ffffff30; }
+.camera-toolbar button[aria-pressed="true"] { color: #8de4c6; background: #103b36d9; }
+.camera-toolbar button:disabled { opacity: .42; cursor: default; }
+.camera-toolbar select {
+  margin-left: auto;
+  height: 32px;
+  padding: 0 5px;
+  color: inherit;
+  color-scheme: dark;
+  border: 1px solid #ffffff45;
+  border-radius: 6px;
+  background: #0b0f16bd;
+  font: inherit;
+  font-size: 12px;
+}
+.remote-notice { margin: 12px 0; }
+.remote-camera details { margin-top: 12px; font-size: 12px; color: #8792a5; }
+.remote-camera pre { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; font-size: 11px; }
+.remote-camera small { display: block; margin-top: 8px; font-size: 12px; }
 </style>

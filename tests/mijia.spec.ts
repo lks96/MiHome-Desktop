@@ -216,6 +216,14 @@ test('remote HLS uses real decoded frames before reporting playback and stops on
     await page.getByRole('button', {name:'远程播放',exact:true}).click()
     await expect(page.getByText('正在播放',{exact:true})).toBeVisible({timeout:15000})
     await expect.poll(() => page.locator('video').evaluate((v:HTMLVideoElement) => v.videoWidth)).toBe(320)
+    const surface = page.getByRole('button', { name: '视频画面', exact: true })
+    await surface.click()
+    await expect(page.getByText('已暂停', { exact: true })).toBeVisible()
+    expect(await page.locator('video').evaluate((v: HTMLVideoElement) => v.paused)).toBe(true)
+    await surface.click()
+    await expect(page.getByText('正在播放', { exact: true })).toBeVisible()
+    expect(await page.locator('video').evaluate((v: HTMLVideoElement) => v.paused)).toBe(false)
+    expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStarts)).toEqual(['camera-1'])
     await page.getByText('连接结果',{exact:true}).click()
     await expect(page.locator('[data-remote-camera-result]')).toContainText('"remotePlaybackVerified": true')
     await expect(page.locator('[data-remote-camera-result]')).not.toContainText('18888')
@@ -352,9 +360,19 @@ test('viewer controls address its session and stop microphone capture on playbac
   await page.getByRole('button', { name: '现场声音开' }).click()
   await talk.click()
   await expect(page.getByRole('button', { name: '麦克风对讲开' })).toHaveAttribute('aria-pressed', 'true')
-  for (const name of ['向上', '向左', '向下', '向右']) {
-    await page.getByRole('button', { name }).click()
+  const surface = page.getByRole('button', { name: '视频画面', exact: true })
+  const bounds = await surface.boundingBox()
+  expect(bounds).not.toBeNull()
+  const x = bounds!.x + bounds!.width / 2
+  const y = bounds!.y + bounds!.height / 2
+  for (const [index, [dx, dy]] of [[0, -90], [-90, 0], [0, 90], [90, 0]].entries()) {
+    await page.mouse.move(x, y)
+    await page.mouse.down()
+    await page.mouse.move(x + dx!, y + dy!, { steps: 5 })
+    await page.mouse.up()
+    await expect.poll(() => page.evaluate(() => (window as any).__mijiaTest.ptz.length)).toBe(index + 1)
   }
+  expect(await page.evaluate(() => (window as any).__mijiaTest.remoteStops)).toEqual([])
   await page.getByRole('button', { name: '停止播放' }).click()
   await expect(talk).toBeDisabled()
   expect(await page.evaluate(() => {
